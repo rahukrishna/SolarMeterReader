@@ -1037,44 +1037,48 @@ function App() {
 
         {isCloudEnabled ? (
           <>
-            <div className="cloud-row">
-              <label>
-                Shared Home Email
-                <input
-                  type="email"
-                  placeholder="you@example.com"
-                  value={cloudEmail}
-                  onChange={(event) => setCloudEmail(event.target.value)}
-                />
-              </label>
-              <label>
-                Password
-                <input
-                  type="password"
-                  placeholder="Enter shared password"
-                  value={cloudPassword}
-                  onChange={(event) => setCloudPassword(event.target.value)}
-                />
-              </label>
-            </div>
+            {!cloudUser && (
+              <>
+                <div className="cloud-row">
+                  <label>
+                    Shared Home Email
+                    <input
+                      type="email"
+                      placeholder="you@example.com"
+                      value={cloudEmail}
+                      onChange={(event) => setCloudEmail(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Password
+                    <input
+                      type="password"
+                      placeholder="Enter shared password"
+                      value={cloudPassword}
+                      onChange={(event) => setCloudPassword(event.target.value)}
+                    />
+                  </label>
+                </div>
 
-            <div className="cloud-actions">
-              <button type="button" onClick={() => void signInWithPassword()} disabled={cloudBusy}>
-                Sign In With Password
-              </button>
-              <button type="button" className="ghost" onClick={() => void createSharedAccount()} disabled={cloudBusy}>
-                Create Shared Account
-              </button>
-              <button type="button" onClick={() => void sendMagicLink()} disabled={cloudBusy}>
-                Send Magic Link (Optional)
-              </button>
-            </div>
+                <div className="cloud-actions">
+                  <button type="button" onClick={() => void signInWithPassword()} disabled={cloudBusy}>
+                    Sign In With Password
+                  </button>
+                  <button type="button" className="ghost" onClick={() => void createSharedAccount()} disabled={cloudBusy}>
+                    Create Shared Account
+                  </button>
+                  <button type="button" onClick={() => void sendMagicLink()} disabled={cloudBusy}>
+                    Send Magic Link (Optional)
+                  </button>
+                </div>
 
-            <div className="cloud-actions">
-              <button type="button" className="ghost" onClick={() => void signInAnonymous()} disabled={cloudBusy}>
-                Continue Anonymously
-              </button>
-            </div>
+                <div className="cloud-actions">
+                  <button type="button" className="ghost" onClick={() => void signInAnonymous()} disabled={cloudBusy}>
+                    Continue Anonymously
+                  </button>
+                </div>
+              </>
+            )}
 
             <div className="cloud-actions">
               <p className="field-hint">
