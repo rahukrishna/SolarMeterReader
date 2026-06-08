@@ -60,10 +60,25 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
+          export GRADLE_OPTS="-Dorg.gradle.internal.http.connectionTimeout=120000 -Dorg.gradle.internal.http.socketTimeout=120000"
           if [ -f keystore.properties ]; then
-            ./gradlew assembleRelease
+            for i in 1 2 3; do
+              ./gradlew --no-daemon assembleRelease && break
+              if [ "$i" -eq 3 ]; then
+                echo "Gradle release build failed after retries."
+                exit 1
+              fi
+              echo "Retrying Gradle release build ($i/3)..."
+            done
           else
-            ./gradlew assembleDebug
+            for i in 1 2 3; do
+              ./gradlew --no-daemon assembleDebug && break
+              if [ "$i" -eq 3 ]; then
+                echo "Gradle debug build failed after retries."
+                exit 1
+              fi
+              echo "Retrying Gradle debug build ($i/3)..."
+            done
           fi
 
       - name: Collect APK
