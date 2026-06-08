@@ -31,3 +31,4 @@ dist-ssr
 android/keystore.properties
 android/*.keystore
 android/*.jks
+android/keystore-base64.txt
