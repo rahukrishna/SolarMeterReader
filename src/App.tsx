@@ -31,6 +31,7 @@ type RangePreset =
 type Reading = {
   id: string
   date: string
+  time: string
   importT?: number
   importT1: number
   importT2: number
@@ -73,6 +74,7 @@ type DerivedReading = Reading & {
 type CloudReadingRow = {
   id: string
   reading_date: string
+  reading_time: string | null
   import_t: number | null
   import_t1: number
   import_t2: number
@@ -95,6 +97,7 @@ const seededReadings: Reading[] = [
   {
     id: 'seed-1',
     date: '2026-05-26',
+    time: '07:00',
     importT: 1,
     importT1: 1,
     importT2: 0,
@@ -110,6 +113,7 @@ const seededReadings: Reading[] = [
   {
     id: 'seed-2',
     date: '2026-06-02',
+    time: '07:00',
     importT: 63,
     importT1: 28,
     importT2: 10,
@@ -125,6 +129,7 @@ const seededReadings: Reading[] = [
   {
     id: 'seed-3',
     date: '2026-06-07',
+    time: '07:00',
     importT: 95,
     importT1: 49,
     importT2: 15,
@@ -165,8 +170,14 @@ const calculateExportTotal = (reading: Reading) =>
 const calculateNet = (reading: Reading) =>
   calculateImportTotal(reading) - calculateExportTotal(reading)
 
+const getReadingTimestamp = (reading: Pick<Reading, 'date' | 'time'>) =>
+  dayjs(`${reading.date}T${reading.time || '00:00'}`).valueOf()
+
 const sortReadings = (items: Reading[]) =>
-  [...items].sort((a, b) => dayjs(a.date).valueOf() - dayjs(b.date).valueOf())
+  [...items].sort((a, b) => {
+    const delta = getReadingTimestamp(a) - getReadingTimestamp(b)
+    return delta !== 0 ? delta : a.id.localeCompare(b.id)
+  })
 
 const deriveReadings = (items: Reading[]): DerivedReading[] => {
   const sorted = sortReadings(items)
@@ -287,7 +298,10 @@ const normalizeReadingIds = (items: Reading[]) =>
   items.map((reading) => ({
     ...reading,
     id: isUuid(reading.id) ? reading.id : createReadingId(),
+    time: reading.time || '07:00',
   }))
+
+const defaultReadingTime = () => dayjs().format('HH:mm')
 
 const formatUnits = (value: number) => `${value.toLocaleString('en-IN')} kWh`
 
@@ -440,6 +454,7 @@ const summarizeBillingCycles = (
 
 type ReadingFormState = {
   date: string
+  time: string
   importT: string
   importT1: string
   importT2: string
@@ -455,6 +470,7 @@ type ReadingFormState = {
 
 const defaultFormState = (): ReadingFormState => ({
   date: dayjs().format('YYYY-MM-DD'),
+  time: defaultReadingTime(),
   importT: '',
   importT1: '0',
   importT2: '0',
@@ -634,7 +650,7 @@ function App() {
   const chartData = useMemo(
     () =>
       filteredReadings.map((reading) => ({
-        date: dayjs(reading.date).format('DD MMM'),
+        date: dayjs(`${reading.date}T${reading.time}`).format('DD MMM HH:mm'),
         import: reading.importDelta,
         export: reading.exportDelta,
         net: reading.netDelta,
@@ -744,6 +760,7 @@ function App() {
     const next: Reading = {
       id: createReadingId(),
       date: formState.date,
+      time: formState.time || defaultReadingTime(),
       importT: effectiveImportT,
       importT1: toNum(formState.importT1),
       importT2: toNum(formState.importT2),
@@ -803,9 +820,10 @@ function App() {
     setCloudMessage('Syncing local readings to cloud...')
 
     const payload = sortedReadings.map((reading) => ({
-      id: createReadingId(),
+      id: reading.id,
       user_id: cloudUser.id,
       reading_date: reading.date,
+      reading_time: reading.time,
       import_t: reading.importT ?? null,
       import_t1: reading.importT1,
       import_t2: reading.importT2,
@@ -822,7 +840,7 @@ function App() {
 
     const { error } = await supabase
       .from('meter_readings')
-      .upsert(payload, { onConflict: 'user_id,reading_date' })
+      .upsert(payload, { onConflict: 'id' })
 
     if (error) {
       setCloudMessage(`Cloud push failed: ${error.message}`)
@@ -844,10 +862,11 @@ function App() {
     const { data, error } = await supabase
       .from('meter_readings')
       .select(
-        'id, reading_date, import_t, import_t1, import_t2, import_t3, export_t, export_t1, export_t2, export_t3, net, solar_generated, note',
+        'id, reading_date, reading_time, import_t, import_t1, import_t2, import_t3, export_t, export_t1, export_t2, export_t3, net, solar_generated, note',
       )
       .eq('user_id', cloudUser.id)
       .order('reading_date', { ascending: true })
+      .order('reading_time', { ascending: true })
 
     if (error) {
       setCloudMessage(`Cloud pull failed: ${error.message}`)
@@ -858,6 +877,7 @@ function App() {
     const cloudReadings: Reading[] = (data as CloudReadingRow[]).map((row) => ({
       id: row.id,
       date: row.reading_date,
+      time: row.reading_time ?? '07:00',
       importT: row.import_t ?? undefined,
       importT1: Number(row.import_t1),
       importT2: Number(row.import_t2),
@@ -1215,6 +1235,15 @@ function App() {
             />
           </label>
           <label>
+            Time
+            <input
+              type="time"
+              value={formState.time}
+              onChange={handleFieldChange('time')}
+              required
+            />
+          </label>
+          <label>
             Import T (Total)
             <input
               type="number"
@@ -1454,6 +1483,7 @@ function App() {
             <thead>
               <tr>
                 <th>Date</th>
+                <th>Time</th>
                 <th>Imp T1</th>
                 <th>Imp T2</th>
                 <th>Imp T3</th>
@@ -1476,6 +1506,7 @@ function App() {
               {derivedReadings.map((reading) => (
                 <tr key={reading.id}>
                   <td>{dayjs(reading.date).format('DD MMM YYYY')}</td>
+                  <td>{reading.time}</td>
                   <td>{reading.importT1.toFixed(2)}</td>
                   <td>{reading.importT2.toFixed(2)}</td>
                   <td>{reading.importT3.toFixed(2)}</td>

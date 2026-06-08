@@ -2,6 +2,7 @@ create table if not exists public.meter_readings (
   id uuid primary key,
   user_id uuid not null references auth.users(id) on delete cascade,
   reading_date date not null,
+  reading_time time not null default '07:00:00',
   import_t numeric,
   import_t1 numeric not null,
   import_t2 numeric not null,
@@ -13,9 +14,14 @@ create table if not exists public.meter_readings (
   net numeric,
   solar_generated numeric not null,
   note text,
-  updated_at timestamptz not null default now(),
-  constraint meter_readings_user_date_unique unique (user_id, reading_date)
+  updated_at timestamptz not null default now()
 );
+
+alter table public.meter_readings
+  add column if not exists reading_time time not null default '07:00:00';
+
+alter table public.meter_readings
+  drop constraint if exists meter_readings_user_date_unique;
 
 alter table public.meter_readings enable row level security;
 
