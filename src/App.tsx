@@ -88,9 +88,28 @@ type CloudReadingRow = {
   note: string | null
 }
 
+type ActivityLogEntry = {
+  id: string
+  timestamp: string
+  action: string
+  details: string
+}
+
+type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>
+  userChoice: Promise<{
+    outcome: 'accepted' | 'dismissed'
+    platform: string
+  }>
+}
+
 const STORAGE_KEY = 'solar-meter-readings-v1'
 const SETTINGS_KEY = 'solar-meter-settings-v1'
 const DATA_VERSION_KEY = 'solar-meter-data-version-v1'
+const ACTIVITY_LOG_KEY = 'solar-meter-activity-log-v1'
+const LAST_BACKUP_KEY = 'solar-meter-last-backup-v1'
 const DATA_VERSION = 3
 
 const seededReadings: Reading[] = [
@@ -499,6 +518,10 @@ const parseOptionalNet = (value: string) => {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+const toPercent = (value: number) => `${value.toFixed(1)}%`
+
+const formatSigned = (value: number) => (value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2))
+
 function App() {
   const [readings, setReadings] = useState<Reading[]>([])
   const [billingDay, setBillingDay] = useState<BillingDay>(1)
@@ -513,6 +536,17 @@ function App() {
   const [cloudBusy, setCloudBusy] = useState(false)
   const [cloudMessage, setCloudMessage] = useState('')
   const [selectedBillingCycleKey, setSelectedBillingCycleKey] = useState<string | null>(null)
+  const [editingReadingId, setEditingReadingId] = useState<string | null>(null)
+  const [lastDeletedReading, setLastDeletedReading] = useState<Reading | null>(null)
+  const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([])
+  const [monthlyPayableGoal, setMonthlyPayableGoal] = useState('0')
+  const [monthlyImportGoal, setMonthlyImportGoal] = useState('0')
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle')
+  const [lastSyncAt, setLastSyncAt] = useState<string>('')
+  const [pendingSyncChanges, setPendingSyncChanges] = useState(0)
+  const [installPromptEvent, setInstallPromptEvent] =
+    useState<BeforeInstallPromptEvent | null>(null)
+  const [updateMessage, setUpdateMessage] = useState('')
 
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
@@ -547,8 +581,18 @@ function App() {
     if (rawSettings) {
       const parsedSettings = JSON.parse(rawSettings) as {
         billingDay: BillingDay
+        monthlyPayableGoal?: number
+        monthlyImportGoal?: number
       }
       setBillingDay(parsedSettings.billingDay ?? 1)
+      setMonthlyPayableGoal(String(parsedSettings.monthlyPayableGoal ?? 0))
+      setMonthlyImportGoal(String(parsedSettings.monthlyImportGoal ?? 0))
+    }
+
+    const rawLog = localStorage.getItem(ACTIVITY_LOG_KEY)
+    if (rawLog) {
+      const parsed = JSON.parse(rawLog) as ActivityLogEntry[]
+      setActivityLog(parsed.slice(0, 100))
     }
 
     setIsHydrated(true)
@@ -592,9 +636,30 @@ function App() {
       SETTINGS_KEY,
       JSON.stringify({
         billingDay,
+        monthlyPayableGoal: Number(monthlyPayableGoal) || 0,
+        monthlyImportGoal: Number(monthlyImportGoal) || 0,
       }),
     )
-  }, [billingDay, isHydrated])
+  }, [billingDay, isHydrated, monthlyImportGoal, monthlyPayableGoal])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(activityLog.slice(0, 100)))
+  }, [activityLog, isHydrated])
+
+  useEffect(() => {
+    const onBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault()
+      setInstallPromptEvent(event as BeforeInstallPromptEvent)
+    }
+
+    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
+    }
+  }, [])
 
   const sortedReadings = useMemo(() => sortReadings(readings), [readings])
   const derivedReadings = useMemo(() => deriveReadings(sortedReadings), [sortedReadings])
@@ -800,6 +865,179 @@ function App() {
     ? billingCycles[billingCycles.length - 1].closingBank
     : 0
 
+  const selectedCycle = useMemo(() => {
+    if (!billingCycles.length) {
+      return undefined
+    }
+    if (selectedBillingCycleKey) {
+      return billingCycles.find((cycle) => cycle.key === selectedBillingCycleKey)
+    }
+    return billingCycles[billingCycles.length - 1]
+  }, [billingCycles, selectedBillingCycleKey])
+
+  const selectedCycleReadings = useMemo(() => {
+    if (!selectedCycle) {
+      return []
+    }
+
+    return derivedReadings.filter((reading) => {
+      const date = dayjs(reading.date)
+      return (
+        (date.isSame(dayjs(selectedCycle.start)) || date.isAfter(dayjs(selectedCycle.start))) &&
+        (date.isSame(dayjs(selectedCycle.end)) || date.isBefore(dayjs(selectedCycle.end)))
+      )
+    })
+  }, [derivedReadings, selectedCycle])
+
+  const previousCycle = useMemo(() => {
+    if (!selectedCycle) {
+      return undefined
+    }
+    const index = billingCycles.findIndex((cycle) => cycle.key === selectedCycle.key)
+    if (index <= 0) {
+      return undefined
+    }
+    return billingCycles[index - 1]
+  }, [billingCycles, selectedCycle])
+
+  const cycleComparison = useMemo(() => {
+    if (!selectedCycle || !previousCycle) {
+      return null
+    }
+
+    const importDiff = selectedCycle.importTotal - previousCycle.importTotal
+    const payableDiff = selectedCycle.payableUnits - previousCycle.payableUnits
+    const netDiff = selectedCycle.net - previousCycle.net
+
+    const safePct = (current: number, prev: number) =>
+      prev === 0 ? 0 : ((current - prev) / Math.abs(prev)) * 100
+
+    return {
+      importDiff,
+      importPct: safePct(selectedCycle.importTotal, previousCycle.importTotal),
+      payableDiff,
+      payablePct: safePct(selectedCycle.payableUnits, previousCycle.payableUnits),
+      netDiff,
+      netPct: safePct(selectedCycle.net, previousCycle.net),
+    }
+  }, [selectedCycle, previousCycle])
+
+  const forecast = useMemo(() => {
+    if (!selectedCycle || !selectedCycleReadings.length) {
+      return null
+    }
+
+    const cycleStart = dayjs(selectedCycle.start)
+    const cycleEnd = dayjs(selectedCycle.end)
+    const totalDays = cycleEnd.diff(cycleStart, 'day') + 1
+    const lastReadingDate = dayjs(
+      selectedCycleReadings[selectedCycleReadings.length - 1].date,
+    )
+    const elapsedDays = Math.max(1, lastReadingDate.diff(cycleStart, 'day') + 1)
+    const multiplier = Math.max(1, totalDays / elapsedDays)
+
+    return {
+      elapsedDays,
+      totalDays,
+      projectedImport: selectedCycle.importTotal * multiplier,
+      projectedExport: selectedCycle.exportTotal * multiplier,
+      projectedNet: selectedCycle.net * multiplier,
+      projectedPayable: selectedCycle.payableUnits * multiplier,
+      projectedSolar: selectedCycleReadings.reduce((sum, row) => sum + row.solarDelta, 0) * multiplier,
+    }
+  }, [selectedCycle, selectedCycleReadings])
+
+  const anomalies = useMemo(() => {
+    const alerts: Array<{ id: string; message: string; level: 'warn' | 'danger' }> = []
+
+    for (let i = 1; i < derivedReadings.length; i += 1) {
+      const current = derivedReadings[i]
+      const previousWindow = derivedReadings.slice(Math.max(1, i - 5), i)
+
+      const avgImport =
+        previousWindow.reduce((sum, row) => sum + row.importDelta, 0) /
+        Math.max(previousWindow.length, 1)
+
+      if (current.importDelta < 0 || current.exportDelta < 0 || current.solarDelta < 0) {
+        alerts.push({
+          id: `neg-${current.id}`,
+          level: 'danger',
+          message: `${dayjs(current.date).format('DD MMM')}: Negative usage delta found. Check meter entry order/values.`,
+        })
+      }
+
+      if (avgImport > 0 && current.importDelta > avgImport * 2.5) {
+        alerts.push({
+          id: `spike-${current.id}`,
+          level: 'warn',
+          message: `${dayjs(current.date).format('DD MMM')}: Import spike ${current.importDelta.toFixed(2)} kWh vs avg ${avgImport.toFixed(2)} kWh.`,
+        })
+      }
+    }
+
+    return alerts.slice(-8).reverse()
+  }, [derivedReadings])
+
+  const solarKpis = useMemo(() => {
+    if (!selectedCycle) {
+      return null
+    }
+
+    const solarAdded = selectedCycleReadings.reduce((sum, row) => sum + row.solarDelta, 0)
+    const exportUsed = selectedCycle.exportTotal
+    const importUsed = selectedCycle.importTotal
+    const selfConsumedSolar = Math.max(solarAdded - exportUsed, 0)
+
+    return {
+      solarAdded,
+      selfConsumedSolar,
+      selfConsumptionRatio: solarAdded > 0 ? (selfConsumedSolar / solarAdded) * 100 : 0,
+      exportRatio: solarAdded > 0 ? (exportUsed / solarAdded) * 100 : 0,
+      solarOffsetRatio: importUsed > 0 ? (selfConsumedSolar / importUsed) * 100 : 0,
+    }
+  }, [selectedCycle, selectedCycleReadings])
+
+  const payableGoalValue = Number(monthlyPayableGoal) || 0
+  const importGoalValue = Number(monthlyImportGoal) || 0
+  const goalProgress = useMemo(() => {
+    if (!selectedCycle) {
+      return null
+    }
+    const payableUsedPct = payableGoalValue > 0 ? (selectedCycle.payableUnits / payableGoalValue) * 100 : 0
+    const importUsedPct = importGoalValue > 0 ? (selectedCycle.importTotal / importGoalValue) * 100 : 0
+    return {
+      payableUsedPct,
+      importUsedPct,
+    }
+  }, [selectedCycle, payableGoalValue, importGoalValue])
+
+  const logActivity = (action: string, details: string) => {
+    const entry: ActivityLogEntry = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      timestamp: new Date().toISOString(),
+      action,
+      details,
+    }
+    setActivityLog((prev) => [entry, ...prev].slice(0, 100))
+  }
+
+  const saveRecoverySnapshot = (data: Reading[]) => {
+    localStorage.setItem(
+      LAST_BACKUP_KEY,
+      JSON.stringify({
+        createdAt: new Date().toISOString(),
+        readings: data,
+      }),
+    )
+  }
+
+  const markLocalChange = () => {
+    setPendingSyncChanges((prev) => prev + 1)
+    if (cloudUser) {
+      setSyncStatus('idle')
+    }
+  }
+
   const handleFieldChange =
     (field: keyof ReadingFormState) =>
     (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -824,7 +1062,7 @@ function App() {
     const derivedNet = effectiveImportT - effectiveExportT
 
     const next: Reading = {
-      id: createReadingId(),
+      id: editingReadingId ?? createReadingId(),
       date: formState.date,
       time: formState.time || defaultReadingTime(),
       importT: effectiveImportT,
@@ -840,9 +1078,20 @@ function App() {
       note: formState.note.trim() || undefined,
     }
 
-    const nextReadings = sortReadings([...readings, next])
+    saveRecoverySnapshot(readings)
+    const nextReadings = sortReadings(
+      editingReadingId
+        ? readings.map((reading) => (reading.id === editingReadingId ? next : reading))
+        : [...readings, next],
+    )
     setReadings(nextReadings)
     setFormState(defaultFormState())
+    markLocalChange()
+    logActivity(
+      editingReadingId ? 'edit-reading' : 'add-reading',
+      `${dayjs(next.date).format('DD MMM YYYY')} ${next.time}`,
+    )
+    setEditingReadingId(null)
 
     if (supabase && cloudUser) {
       void pushToCloud(nextReadings, true)
@@ -866,7 +1115,50 @@ function App() {
     enteredNet !== undefined && Math.abs(enteredNet - derivedNet) > 0.001
 
   const deleteReading = (id: string) => {
+    const toDelete = readings.find((item) => item.id === id)
+    if (!toDelete) {
+      return
+    }
+    saveRecoverySnapshot(readings)
+    setLastDeletedReading(toDelete)
     setReadings((prev) => prev.filter((item) => item.id !== id))
+    markLocalChange()
+    logActivity('delete-reading', `${dayjs(toDelete.date).format('DD MMM YYYY')} ${toDelete.time}`)
+  }
+
+  const undoDeleteReading = () => {
+    if (!lastDeletedReading) {
+      return
+    }
+    const restored = sortReadings([...readings, lastDeletedReading])
+    setReadings(restored)
+    setLastDeletedReading(null)
+    markLocalChange()
+    logActivity('undo-delete', `${dayjs(restored[restored.length - 1].date).format('DD MMM YYYY')}`)
+  }
+
+  const startEditingReading = (reading: Reading) => {
+    setEditingReadingId(reading.id)
+    setFormState({
+      date: reading.date,
+      time: reading.time,
+      importT: reading.importT?.toString() ?? '',
+      importT1: reading.importT1.toString(),
+      importT2: reading.importT2.toString(),
+      importT3: reading.importT3.toString(),
+      exportT: reading.exportT?.toString() ?? '',
+      exportT1: reading.exportT1.toString(),
+      exportT2: reading.exportT2.toString(),
+      exportT3: reading.exportT3.toString(),
+      net: reading.net?.toString() ?? '',
+      solarGenerated: reading.solarGenerated.toString(),
+      note: reading.note ?? '',
+    })
+  }
+
+  const cancelEditing = () => {
+    setEditingReadingId(null)
+    setFormState(defaultFormState())
   }
 
   const exportData = () => {
@@ -879,6 +1171,181 @@ function App() {
     anchor.download = `solar-meter-data-${dayjs().format('YYYYMMDD-HHmmss')}.json`
     anchor.click()
     URL.revokeObjectURL(url)
+    logActivity('export-json', `Exported ${readings.length} readings`)
+  }
+
+  const exportMonthlyCsv = () => {
+    if (!selectedCycleReadings.length || !selectedCycle) {
+      return
+    }
+
+    const header = [
+      'Date',
+      'Time',
+      'Import Used',
+      'Export Used',
+      'Net Used',
+      'Solar Added',
+      'Payable Cycle',
+      'Opening Bank',
+      'Closing Bank',
+    ]
+    const rows = selectedCycleReadings.map((row) => [
+      dayjs(row.date).format('YYYY-MM-DD'),
+      row.time,
+      row.importDelta.toFixed(2),
+      row.exportDelta.toFixed(2),
+      row.netDelta.toFixed(2),
+      row.solarDelta.toFixed(2),
+      selectedCycle.payableUnits.toFixed(2),
+      selectedCycle.openingBank.toFixed(2),
+      selectedCycle.closingBank.toFixed(2),
+    ])
+
+    const csv = [header, ...rows].map((line) => line.join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `monthly-report-${dayjs(selectedCycle.start).format('YYYY-MM')}.csv`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    logActivity('export-csv', `Monthly CSV ${dayjs(selectedCycle.start).format('MMM YYYY')}`)
+  }
+
+  const exportMonthlyPdf = () => {
+    if (!selectedCycle) {
+      return
+    }
+
+    const html = `
+      <html>
+        <head>
+          <title>Monthly Report</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 20px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+            th, td { border: 1px solid #ccc; padding: 6px; text-align: left; }
+            th { background: #f2f2f2; }
+          </style>
+        </head>
+        <body>
+          <h2>Solar Meter Monthly Report</h2>
+          <p>Cycle: ${dayjs(selectedCycle.start).format('DD MMM YYYY')} - ${dayjs(selectedCycle.end).format('DD MMM YYYY')}</p>
+          <p>Import: ${selectedCycle.importTotal.toFixed(2)} kWh | Export: ${selectedCycle.exportTotal.toFixed(2)} kWh | Payable: ${selectedCycle.payableUnits.toFixed(2)} kWh</p>
+          <table>
+            <thead>
+              <tr><th>Date</th><th>Time</th><th>Import Used</th><th>Export Used</th><th>Net</th><th>Solar Added</th></tr>
+            </thead>
+            <tbody>
+              ${selectedCycleReadings
+                .map(
+                  (row) =>
+                    `<tr><td>${dayjs(row.date).format('DD MMM YYYY')}</td><td>${row.time}</td><td>${row.importDelta.toFixed(2)}</td><td>${row.exportDelta.toFixed(2)}</td><td>${row.netDelta.toFixed(2)}</td><td>${row.solarDelta.toFixed(2)}</td></tr>`,
+                )
+                .join('')}
+            </tbody>
+          </table>
+        </body>
+      </html>
+    `
+
+    const reportWindow = window.open('', '_blank', 'width=900,height=700')
+    if (reportWindow) {
+      reportWindow.document.write(html)
+      reportWindow.document.close()
+      reportWindow.focus()
+      reportWindow.print()
+      logActivity('export-pdf', `Monthly PDF ${dayjs(selectedCycle.start).format('MMM YYYY')}`)
+    }
+  }
+
+  const importDataFromFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result)) as Reading[]
+        if (!Array.isArray(parsed)) {
+          throw new Error('Invalid backup format.')
+        }
+
+        const sanitized = sortReadings(
+          parsed.map((item) => ({
+            ...item,
+            id: item.id && typeof item.id === 'string' ? item.id : createReadingId(),
+            date: item.date,
+            time: item.time || '07:00',
+            importT1: Number(item.importT1 || 0),
+            importT2: Number(item.importT2 || 0),
+            importT3: Number(item.importT3 || 0),
+            exportT1: Number(item.exportT1 || 0),
+            exportT2: Number(item.exportT2 || 0),
+            exportT3: Number(item.exportT3 || 0),
+            solarGenerated: Number(item.solarGenerated || 0),
+          })),
+        )
+
+        saveRecoverySnapshot(readings)
+        setReadings(sanitized)
+        setCloudMessage(`Imported ${sanitized.length} readings from backup.`)
+        markLocalChange()
+        logActivity('import-json', `Imported ${sanitized.length} readings`)
+      } catch (error) {
+        setCloudMessage(
+          `Backup import failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        )
+      }
+    }
+    reader.readAsText(file)
+    event.target.value = ''
+  }
+
+  const restoreLastBackup = () => {
+    const raw = localStorage.getItem(LAST_BACKUP_KEY)
+    if (!raw) {
+      setCloudMessage('No recovery backup found.')
+      return
+    }
+
+    const parsed = JSON.parse(raw) as { createdAt: string; readings: Reading[] }
+    const restored = sortReadings(parsed.readings || [])
+    setReadings(restored)
+    markLocalChange()
+    logActivity('restore-backup', `Restored snapshot from ${dayjs(parsed.createdAt).format('DD MMM YYYY HH:mm')}`)
+  }
+
+  const installApp = async () => {
+    if (!installPromptEvent) {
+      setUpdateMessage('Install prompt is not available yet. Open app in a supported browser and try again.')
+      return
+    }
+    await installPromptEvent.prompt()
+    const choice = await installPromptEvent.userChoice
+    setUpdateMessage(
+      choice.outcome === 'accepted' ? 'App install started.' : 'Install prompt dismissed.',
+    )
+    setInstallPromptEvent(null)
+  }
+
+  const checkForUpdates = async () => {
+    if (!('serviceWorker' in navigator)) {
+      setUpdateMessage('Service Worker not available in this browser.')
+      return
+    }
+
+    const registrations = await navigator.serviceWorker.getRegistrations()
+    if (!registrations.length) {
+      setUpdateMessage('No service worker update channel found. Deploy latest build and refresh browser.')
+      return
+    }
+
+    await Promise.all(registrations.map((registration) => registration.update()))
+    setUpdateMessage('Checked for updates. Refresh the app to apply latest build.')
   }
 
   const pushToCloud = async (readingsToSync = sortedReadings, silent = false) => {
@@ -889,6 +1356,7 @@ function App() {
       return
     }
 
+    setSyncStatus('syncing')
     setCloudBusy(true)
     if (!silent) {
       setCloudMessage('Syncing local readings to cloud...')
@@ -919,10 +1387,17 @@ function App() {
 
     if (error) {
       setCloudMessage(`Cloud push failed: ${error.message}`)
+      setSyncStatus('error')
     } else if (!silent) {
       setCloudMessage('Cloud sync complete: local data uploaded.')
+      setSyncStatus('success')
+      setLastSyncAt(new Date().toISOString())
+      setPendingSyncChanges(0)
     } else {
       setCloudMessage('Reading saved locally and synced to cloud automatically.')
+      setSyncStatus('success')
+      setLastSyncAt(new Date().toISOString())
+      setPendingSyncChanges(0)
     }
     setCloudBusy(false)
   }
@@ -935,6 +1410,7 @@ function App() {
       return
     }
 
+    setSyncStatus('syncing')
     setCloudBusy(true)
     if (!silent) {
       setCloudMessage('Downloading readings from cloud...')
@@ -951,6 +1427,7 @@ function App() {
 
     if (error) {
       setCloudMessage(`Cloud pull failed: ${error.message}`)
+      setSyncStatus('error')
       setCloudBusy(false)
       return
     }
@@ -979,8 +1456,12 @@ function App() {
           ? `Auto-synced ${cloudReadings.length} readings from cloud.`
           : `Cloud download complete: ${cloudReadings.length} readings loaded.`,
       )
+      setSyncStatus('success')
+      setLastSyncAt(new Date().toISOString())
+      setPendingSyncChanges(0)
     } else if (!silent) {
       setCloudMessage('No cloud readings found. Keeping local data as-is.')
+      setSyncStatus('idle')
     }
     setCloudBusy(false)
   }
@@ -1141,6 +1622,29 @@ function App() {
           <button type="button" onClick={exportData} className="ghost">
             Export JSON Backup
           </button>
+          <label>
+            Import JSON Backup
+            <input type="file" accept="application/json" onChange={importDataFromFile} />
+          </label>
+          <button type="button" onClick={restoreLastBackup} className="ghost">
+            Restore Last Backup
+          </button>
+        </div>
+        {lastDeletedReading && (
+          <div className="inline-actions">
+            <p className="field-hint">Deleted one reading. Undo available.</p>
+            <button type="button" onClick={undoDeleteReading} className="ghost">
+              Undo Delete
+            </button>
+          </div>
+        )}
+        <div className="sync-status">
+          <strong>Sync Status:</strong>
+          <span className={`sync-badge ${syncStatus}`}>{syncStatus.toUpperCase()}</span>
+          <span>
+            Pending changes: {pendingSyncChanges} | Last sync:{' '}
+            {lastSyncAt ? dayjs(lastSyncAt).format('DD MMM YYYY HH:mm') : 'Never'}
+          </span>
         </div>
       </section>
 
@@ -1348,7 +1852,45 @@ function App() {
       </section>
 
       <section className="card form-card">
-        <h2>Add Daily Reading</h2>
+        <h2>{editingReadingId ? 'Edit Reading' : 'Add Daily Reading'}</h2>
+        <div className="inline-actions">
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              setFormState((prev) => ({
+                ...prev,
+                date: dayjs().format('YYYY-MM-DD'),
+                time: defaultReadingTime(),
+              }))
+            }}
+          >
+            Use Current Date/Time
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              const latest = sortedReadings[sortedReadings.length - 1]
+              if (!latest) {
+                return
+              }
+              setFormState((prev) => ({
+                ...prev,
+                importT: calculateImportTotal(latest).toString(),
+                exportT: calculateExportTotal(latest).toString(),
+                solarGenerated: latest.solarGenerated.toString(),
+              }))
+            }}
+          >
+            Copy Last Totals
+          </button>
+          {editingReadingId && (
+            <button type="button" className="ghost" onClick={cancelEditing}>
+              Cancel Edit
+            </button>
+          )}
+        </div>
         <form onSubmit={handleAddReading} className="reading-form">
           <label>
             Date
@@ -1485,8 +2027,182 @@ function App() {
               readings.
             </p>
           )}
-          <button type="submit">Add Reading</button>
+          <button type="submit">{editingReadingId ? 'Save Reading' : 'Add Reading'}</button>
         </form>
+      </section>
+
+      <section className="card">
+        <div className="section-head">
+          <h2>Alerts and Anomaly Detection</h2>
+          <p className="field-hint">Auto-detected from recent reading deltas</p>
+        </div>
+        {anomalies.length ? (
+          <div className="alerts-list">
+            {anomalies.map((alert) => (
+              <div key={alert.id} className={`alert-row ${alert.level}`}>
+                <strong>{alert.level === 'danger' ? 'Critical' : 'Warning'}</strong>
+                <span>{alert.message}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-state">No anomalies found in current data.</p>
+        )}
+      </section>
+
+      <section className="card insights-grid">
+        <article>
+          <h2>Compare Periods</h2>
+          {cycleComparison ? (
+            <div className="tracker-metrics">
+              <div>
+                <span>Import vs Previous</span>
+                <strong>
+                  {formatSigned(cycleComparison.importDiff)} kWh ({toPercent(cycleComparison.importPct)})
+                </strong>
+              </div>
+              <div>
+                <span>Net vs Previous</span>
+                <strong>
+                  {formatSigned(cycleComparison.netDiff)} kWh ({toPercent(cycleComparison.netPct)})
+                </strong>
+              </div>
+              <div>
+                <span>Payable vs Previous</span>
+                <strong>
+                  {formatSigned(cycleComparison.payableDiff)} kWh ({toPercent(cycleComparison.payablePct)})
+                </strong>
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state">Need at least two billing cycles for comparison.</p>
+          )}
+        </article>
+
+        <article>
+          <h2>Forecasting</h2>
+          {forecast ? (
+            <div className="tracker-metrics">
+              <div>
+                <span>Cycle Progress</span>
+                <strong>
+                  {forecast.elapsedDays}/{forecast.totalDays} days
+                </strong>
+              </div>
+              <div>
+                <span>Projected Import</span>
+                <strong>{formatUnits(forecast.projectedImport)}</strong>
+              </div>
+              <div>
+                <span>Projected Payable</span>
+                <strong>{formatUnits(forecast.projectedPayable)}</strong>
+              </div>
+              <div>
+                <span>Projected Solar</span>
+                <strong>{formatUnits(forecast.projectedSolar)}</strong>
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state">No forecast yet for this cycle.</p>
+          )}
+        </article>
+      </section>
+
+      <section className="card insights-grid">
+        <article>
+          <h2>Solar Performance KPIs</h2>
+          {solarKpis ? (
+            <div className="tracker-metrics">
+              <div>
+                <span>Solar Added</span>
+                <strong>{formatUnits(solarKpis.solarAdded)}</strong>
+              </div>
+              <div>
+                <span>Self Consumed Solar</span>
+                <strong>{formatUnits(solarKpis.selfConsumedSolar)}</strong>
+              </div>
+              <div>
+                <span>Self Consumption Ratio</span>
+                <strong>{toPercent(solarKpis.selfConsumptionRatio)}</strong>
+              </div>
+              <div>
+                <span>Solar Export Ratio</span>
+                <strong>{toPercent(solarKpis.exportRatio)}</strong>
+              </div>
+              <div>
+                <span>Solar Offset Ratio</span>
+                <strong>{toPercent(solarKpis.solarOffsetRatio)}</strong>
+              </div>
+            </div>
+          ) : (
+            <p className="empty-state">No KPI data available.</p>
+          )}
+        </article>
+
+        <article>
+          <h2>Goal Tracking</h2>
+          <div className="goals-grid">
+            <label>
+              Payable Goal (kWh)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={monthlyPayableGoal}
+                onChange={(event) => setMonthlyPayableGoal(event.target.value)}
+              />
+            </label>
+            <label>
+              Import Goal (kWh)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={monthlyImportGoal}
+                onChange={(event) => setMonthlyImportGoal(event.target.value)}
+              />
+            </label>
+          </div>
+          {goalProgress && (
+            <div className="tracker-metrics">
+              <div>
+                <span>Payable Goal Used</span>
+                <strong>{toPercent(goalProgress.payableUsedPct)}</strong>
+              </div>
+              <div>
+                <span>Import Goal Used</span>
+                <strong>{toPercent(goalProgress.importUsedPct)}</strong>
+              </div>
+            </div>
+          )}
+        </article>
+      </section>
+
+      <section className="card insights-grid">
+        <article>
+          <h2>Monthly Report (PDF/CSV)</h2>
+          <div className="inline-actions">
+            <button type="button" className="ghost" onClick={exportMonthlyCsv}>
+              Export Monthly CSV
+            </button>
+            <button type="button" className="ghost" onClick={exportMonthlyPdf}>
+              Export Monthly PDF
+            </button>
+          </div>
+        </article>
+
+        <article>
+          <h2>Install and Update UX</h2>
+          <div className="inline-actions">
+            <button type="button" className="ghost" onClick={() => void installApp()}>
+              Install App
+            </button>
+            <button type="button" className="ghost" onClick={() => void checkForUpdates()}>
+              Check for Update
+            </button>
+          </div>
+          {updateMessage && <p className="field-hint">{updateMessage}</p>}
+        </article>
       </section>
 
       <section className="card">
@@ -1579,7 +2295,11 @@ function App() {
             </thead>
             <tbody>
               {billingCycles.map((cycle) => (
-                <tr key={cycle.key}>
+                <tr
+                  key={cycle.key}
+                  className={selectedCycle?.key === cycle.key ? 'selected-row' : ''}
+                  onClick={() => setSelectedBillingCycleKey(cycle.key)}
+                >
                   <td>
                     {dayjs(cycle.start).format('DD MMM YYYY')} -{' '}
                     {dayjs(cycle.end).format('DD MMM YYYY')}
@@ -1599,6 +2319,70 @@ function App() {
         </div>
 
         {!billingCycles.length && <p className="empty-state">No billing cycles yet.</p>}
+      </section>
+
+      <section className="card table-card">
+        <h2>Dashboard Drill-down ({selectedCycleReadings.length})</h2>
+        <p className="field-hint">
+          Selected cycle:{' '}
+          {selectedCycle
+            ? `${dayjs(selectedCycle.start).format('DD MMM YYYY')} - ${dayjs(selectedCycle.end).format('DD MMM YYYY')}`
+            : 'None'}
+        </p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Time</th>
+                <th>Import Used</th>
+                <th>Export Used</th>
+                <th>Net Used</th>
+                <th>Solar Added</th>
+              </tr>
+            </thead>
+            <tbody>
+              {selectedCycleReadings.map((reading) => (
+                <tr key={`drill-${reading.id}`}>
+                  <td>{dayjs(reading.date).format('DD MMM YYYY')}</td>
+                  <td>{reading.time}</td>
+                  <td>{reading.importDelta.toFixed(2)}</td>
+                  <td>{reading.exportDelta.toFixed(2)}</td>
+                  <td>{reading.netDelta.toFixed(2)}</td>
+                  <td>{reading.solarDelta.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!selectedCycleReadings.length && (
+          <p className="empty-state">No readings in selected cycle.</p>
+        )}
+      </section>
+
+      <section className="card table-card">
+        <h2>Activity History</h2>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Action</th>
+                <th>Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {activityLog.map((item) => (
+                <tr key={item.id}>
+                  <td>{dayjs(item.timestamp).format('DD MMM YYYY HH:mm')}</td>
+                  <td>{item.action}</td>
+                  <td>{item.details}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!activityLog.length && <p className="empty-state">No activity yet.</p>}
       </section>
 
       <section className="card table-card">
@@ -1648,6 +2432,13 @@ function App() {
                   <td>{reading.solarDelta.toFixed(2)}</td>
                   <td>{reading.note ?? '-'}</td>
                   <td>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => startEditingReading(reading)}
+                    >
+                      Edit
+                    </button>
                     <button
                       type="button"
                       className="danger"

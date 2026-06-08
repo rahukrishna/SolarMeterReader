@@ -169,6 +169,52 @@ button.danger {
   margin-right: 0.45rem;
 }
 
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+  margin-top: 0.6rem;
+}
+
+.sync-status {
+  margin-top: 0.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+  font-size: 0.83rem;
+  color: #34586a;
+}
+
+.sync-badge {
+  border-radius: 999px;
+  border: 1px solid #b5cad7;
+  background: #eef5f9;
+  color: #234b61;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.sync-badge.syncing {
+  background: #fff4dc;
+  border-color: #ebcc90;
+  color: #7f4f11;
+}
+
+.sync-badge.success {
+  background: #e4f8eb;
+  border-color: #9fd2b0;
+  color: #1f653a;
+}
+
+.sync-badge.error {
+  background: #ffebeb;
+  border-color: #ebadad;
+  color: #8d2a2a;
+}
+
 .cloud-message {
   margin: 0;
   color: #325667;
@@ -240,6 +286,14 @@ button.danger {
 .table-wrap {
   overflow-x: auto;
   margin-top: 0.7rem;
+}
+
+.selected-row {
+  background: #eaf5fb;
+}
+
+.table-wrap tbody tr {
+  cursor: pointer;
 }
 
 table {
@@ -408,12 +462,78 @@ th {
   font-size: 1.08rem;
 }
 
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.insights-grid article {
+  border: 1px solid #d6e0e7;
+  border-radius: 12px;
+  padding: 0.75rem;
+  background: #f9fcfe;
+}
+
+.insights-grid h2 {
+  margin: 0 0 0.55rem;
+  font-size: 1rem;
+  color: #204457;
+}
+
+.alerts-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.alert-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  border-radius: 10px;
+  border: 1px solid #d6e0e7;
+  background: #f5fbfe;
+  padding: 0.55rem 0.65rem;
+}
+
+.alert-row.warn {
+  border-color: #e8c57f;
+  background: #fff7e6;
+}
+
+.alert-row.danger {
+  border-color: #e6a4a4;
+  background: #fff0f0;
+}
+
+.alert-row strong {
+  font-size: 0.8rem;
+}
+
+.alert-row span {
+  font-size: 0.84rem;
+  color: #304e5f;
+}
+
+.goals-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin-bottom: 0.55rem;
+}
+
 @media (max-width: 1060px) {
   .cards-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .tracker-panels {
+    grid-template-columns: 1fr;
+  }
+
+  .insights-grid {
     grid-template-columns: 1fr;
   }
 
@@ -460,6 +580,10 @@ th {
   }
 
   .custom-range {
+    grid-template-columns: 1fr;
+  }
+
+  .goals-grid {
     grid-template-columns: 1fr;
   }
 }
