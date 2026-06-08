@@ -26,3 +26,8 @@ dist-ssr
 *.sln
 *.sw?
 .gitleaks.toml
+
+# Android signing files
+android/keystore.properties
+android/*.keystore
+android/*.jks

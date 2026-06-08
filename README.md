@@ -100,6 +100,51 @@ This repository includes `.github/workflows/deploy-pages.yml` to auto-deploy on 
 3. Push to `main` again (or run workflow manually).
 4. Your app URL will appear in the workflow summary.
 
+## Android APK (One-Click Download + Install)
+
+This repo now includes Android build support using Capacitor and GitHub Actions.
+
+### Build Android locally
+
+```bash
+npm install
+npm run android:build:debug
+```
+
+Debug APK output:
+
+```bash
+android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Auto-build APK on every push
+
+Workflow: `.github/workflows/android-apk.yml`
+
+- Every push to `main` builds APK automatically.
+- APK is uploaded as a workflow artifact.
+- Latest APK is also published in GitHub Releases with tag `android-latest`.
+
+### Production-ready signed release APK
+
+To publish signed release APK (installable for production), add these repository secrets:
+
+- `ANDROID_KEYSTORE_BASE64` (base64 of your keystore file)
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_PASSWORD`
+
+If secrets are missing, workflow falls back to debug APK.
+
+### One-click mobile install flow
+
+1. Open your repo on mobile.
+2. Go to **Releases**.
+3. Open release **Android Latest APK**.
+4. Tap the APK asset to download and install.
+
+If Android blocks install, allow install from browser/files app once.
+
 ## Notes
 
 - Data is stored in browser LocalStorage. If you change browser/device, data does not sync automatically.

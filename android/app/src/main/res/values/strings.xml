@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Solar Meter Reader</string>
+    <string name="title_activity_main">Solar Meter Reader</string>
+    <string name="package_name">com.solarmeterreader.app</string>
+    <string name="custom_url_scheme">com.solarmeterreader.app</string>
+</resources>
