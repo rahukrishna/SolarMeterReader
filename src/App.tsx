@@ -774,8 +774,13 @@ function App() {
       note: formState.note.trim() || undefined,
     }
 
-    setReadings((prev) => sortReadings([...prev, next]))
+    const nextReadings = sortReadings([...readings, next])
+    setReadings(nextReadings)
     setFormState(defaultFormState())
+
+    if (supabase && cloudUser) {
+      void pushToCloud(nextReadings, true)
+    }
   }
 
   const formImportTZTotal =
@@ -810,16 +815,20 @@ function App() {
     URL.revokeObjectURL(url)
   }
 
-  const pushToCloud = async () => {
+  const pushToCloud = async (readingsToSync = sortedReadings, silent = false) => {
     if (!supabase || !cloudUser) {
-      setCloudMessage('Sign in to cloud first.')
+      if (!silent) {
+        setCloudMessage('Sign in to cloud first.')
+      }
       return
     }
 
     setCloudBusy(true)
-    setCloudMessage('Syncing local readings to cloud...')
+    if (!silent) {
+      setCloudMessage('Syncing local readings to cloud...')
+    }
 
-    const payload = sortedReadings.map((reading) => ({
+    const payload = readingsToSync.map((reading) => ({
       id: reading.id,
       user_id: cloudUser.id,
       reading_date: reading.date,
@@ -844,20 +853,26 @@ function App() {
 
     if (error) {
       setCloudMessage(`Cloud push failed: ${error.message}`)
-    } else {
+    } else if (!silent) {
       setCloudMessage('Cloud sync complete: local data uploaded.')
+    } else {
+      setCloudMessage('Reading saved locally and synced to cloud automatically.')
     }
     setCloudBusy(false)
   }
 
-  const pullFromCloud = async () => {
+  const pullFromCloud = async (silent = false) => {
     if (!supabase || !cloudUser) {
-      setCloudMessage('Sign in to cloud first.')
+      if (!silent) {
+        setCloudMessage('Sign in to cloud first.')
+      }
       return
     }
 
     setCloudBusy(true)
-    setCloudMessage('Downloading readings from cloud...')
+    if (!silent) {
+      setCloudMessage('Downloading readings from cloud...')
+    }
 
     const { data, error } = await supabase
       .from('meter_readings')
@@ -891,8 +906,16 @@ function App() {
       note: row.note ?? undefined,
     }))
 
-    setReadings(sortReadings(cloudReadings))
-    setCloudMessage(`Cloud download complete: ${cloudReadings.length} readings loaded.`)
+    if (cloudReadings.length > 0) {
+      setReadings(sortReadings(cloudReadings))
+      setCloudMessage(
+        silent
+          ? `Auto-synced ${cloudReadings.length} readings from cloud.`
+          : `Cloud download complete: ${cloudReadings.length} readings loaded.`,
+      )
+    } else if (!silent) {
+      setCloudMessage('No cloud readings found. Keeping local data as-is.')
+    }
     setCloudBusy(false)
   }
 
@@ -993,6 +1016,14 @@ function App() {
     }
     setCloudBusy(false)
   }
+
+  useEffect(() => {
+    if (!cloudUser || !isHydrated) {
+      return
+    }
+
+    void pullFromCloud(true)
+  }, [cloudUser?.id, isHydrated])
 
   return (
     <main className="app-shell">
