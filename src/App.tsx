@@ -1575,13 +1575,50 @@ function App() {
   return (
     <main className="app-shell">
       <header className="hero">
-        <p className="eyebrow">Solar Meter Reader</p>
-        <h1>Track Import, Export, Net, Solar, and Energy Bank</h1>
-        <p className="hero-subtitle">
-          Enter cumulative meter snapshots. App calculates usage by difference from the
-          previous reading and applies billing-cycle bank adjustment with annual settlement
-          on 31 March.
-        </p>
+        <div className="hero-layout">
+          <div className="hero-copy">
+            <div className="hero-topline">
+              <div className="hero-brandmark" aria-hidden="true">
+                <span className="brand-halo" />
+                <span className="brand-sun" />
+                <span className="brand-roof" />
+                <span className="brand-panel" />
+                <span className="brand-meter" />
+              </div>
+              <div>
+                <p className="eyebrow">Solar Meter Reader</p>
+                <h1>
+                  Track power flow with a cleaner{' '}
+                  <span className="hero-accent">solar</span> usage dashboard
+                </h1>
+              </div>
+            </div>
+            <p className="hero-subtitle">
+              Capture meter snapshots, monitor import and export trends, and keep your
+              bank units and payable usage clear across every billing cycle.
+            </p>
+            <div className="hero-badges" aria-label="Highlights">
+              <span>Import, export, and net tracking</span>
+              <span>Bank-aware billing cycles</span>
+              <span>Reports, goals, and sync</span>
+            </div>
+          </div>
+
+          <div className="hero-visual" aria-hidden="true">
+            <div className="hero-visual-ring" />
+            <div className="hero-visual-grid" />
+            <div className="hero-brandmark hero-brandmark-large">
+              <span className="brand-halo" />
+              <span className="brand-sun" />
+              <span className="brand-roof" />
+              <span className="brand-panel" />
+              <span className="brand-meter" />
+            </div>
+            <div className="hero-mini-card hero-mini-card-top">Live bank units</div>
+            <div className="hero-mini-card hero-mini-card-bottom">Cloud-ready logs</div>
+            <div className="hero-mini-pill">Solar meter ledger</div>
+          </div>
+        </div>
       </header>
 
       <section className="cards-grid">
@@ -2278,6 +2315,10 @@ function App() {
 
       <section className="card table-card">
         <h2>Billing Cycle Summary (Usage Deltas)</h2>
+        <p className="section-note">
+          Annual settlement reset is tracked automatically inside the cycle summary and
+          reflected in closing bank values.
+        </p>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2455,8 +2496,9 @@ function App() {
       </section>
 
       <footer className="footer-note">
-        Data is stored locally in your browser. You can host this app for free on GitHub
-        Pages.
+        Data stays local in your browser by default, with optional cloud sync when enabled.
+        Annual settlement handling is built into the billing logic and shown in the cycle
+        summary.
       </footer>
     </main>
   )
