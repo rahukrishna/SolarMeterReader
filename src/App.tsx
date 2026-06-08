@@ -544,6 +544,7 @@ function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('idle')
   const [lastSyncAt, setLastSyncAt] = useState<string>('')
   const [pendingSyncChanges, setPendingSyncChanges] = useState(0)
+  const [showManualSyncTools, setShowManualSyncTools] = useState(false)
   const [installPromptEvent, setInstallPromptEvent] =
     useState<BeforeInstallPromptEvent | null>(null)
   const [updateMessage, setUpdateMessage] = useState('')
@@ -660,6 +661,12 @@ function App() {
       window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt)
     }
   }, [])
+
+  useEffect(() => {
+    if (syncStatus === 'error' || pendingSyncChanges > 0) {
+      setShowManualSyncTools(true)
+    }
+  }, [syncStatus, pendingSyncChanges])
 
   const sortedReadings = useMemo(() => sortReadings(readings), [readings])
   const derivedReadings = useMemo(() => deriveReadings(sortedReadings), [sortedReadings])
@@ -1747,16 +1754,46 @@ function App() {
                     : `Anonymous (${cloudUser.id.slice(0, 8)}...)`
                   : 'Not signed in'}
               </p>
-              <button type="button" onClick={() => void pullFromCloud()} disabled={!cloudUser || cloudBusy}>
-                Download From Cloud
-              </button>
-              <button type="button" onClick={() => void pushToCloud()} disabled={!cloudUser || cloudBusy}>
-                Upload To Cloud
-              </button>
               <button type="button" className="ghost" onClick={() => void signOutCloud()} disabled={!cloudUser || cloudBusy}>
                 Sign Out
               </button>
             </div>
+            {cloudUser && (
+              <div className="manual-sync-tools">
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => setShowManualSyncTools((prev) => !prev)}
+                  disabled={cloudBusy}
+                >
+                  {showManualSyncTools ? 'Hide Manual Sync Tools' : 'Show Manual Sync Tools'}
+                </button>
+
+                {showManualSyncTools && (
+                  <div className="manual-sync-panel">
+                    <p className="field-hint">
+                      Auto-sync is enabled. Use these only when you want a forced upload/download.
+                    </p>
+                    <div className="cloud-actions">
+                      <button
+                        type="button"
+                        onClick={() => void pullFromCloud()}
+                        disabled={!cloudUser || cloudBusy}
+                      >
+                        Download From Cloud
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void pushToCloud()}
+                        disabled={!cloudUser || cloudBusy}
+                      >
+                        Upload To Cloud
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {cloudUser && !cloudUser.email && (
               <p className="cloud-message">
                 Anonymous login is device-specific. To see the same data on mobile and laptop,
@@ -1780,18 +1817,13 @@ function App() {
           </p>
         </div>
 
-        <div style={{ marginBottom: '1rem' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <div className="month-select-row">
+          <label className="month-select-label">
             <span>Select Month:</span>
             <select
+              className="month-select-input"
               value={selectedBillingCycleKey ?? ''}
               onChange={(e) => setSelectedBillingCycleKey(e.target.value || null)}
-              style={{
-                padding: '0.5rem 0.75rem',
-                borderRadius: '4px',
-                border: '1px solid #ccc',
-                fontSize: '1rem',
-              }}
             >
               <option value="">Current Month</option>
               {billingCycles.map((cycle) => (

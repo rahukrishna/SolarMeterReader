@@ -436,6 +436,19 @@ button.danger {
   margin-right: 0.45rem;
 }
 
+.manual-sync-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.manual-sync-panel {
+  border: 1px dashed #b8cad5;
+  background: #f4fafd;
+  border-radius: 10px;
+  padding: 0.65rem;
+}
+
 .inline-actions {
   display: flex;
   flex-wrap: wrap;
@@ -604,6 +617,20 @@ th {
 
 .month-tracker .section-head {
   margin-bottom: 0.7rem;
+}
+
+.month-select-row {
+  margin-bottom: 1rem;
+}
+
+.month-select-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.month-select-input {
+  min-width: 240px;
 }
 
 .month-tracker .section-head h2 {
@@ -909,6 +936,40 @@ th {
   .hero-mini-pill {
     left: 18px;
     bottom: 46px;
+  }
+
+  .hero-visual {
+    display: none;
+  }
+
+  .month-select-label {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .month-select-input {
+    min-width: 100%;
+  }
+
+  .inline-actions button,
+  .cloud-actions button,
+  .manual-sync-tools button {
+    width: 100%;
+  }
+
+  .cloud-actions .field-hint,
+  .sync-status span {
+    width: 100%;
+    margin-right: 0;
+  }
+
+  .card {
+    padding: 0.82rem;
+  }
+
+  table {
+    min-width: 760px;
   }
 
   .cards-grid {
