@@ -59,6 +59,7 @@ jobs:
       - name: Build APK
         run: |
           cd android
+          chmod +x gradlew
           if [ -f keystore.properties ]; then
             ./gradlew assembleRelease
           else
