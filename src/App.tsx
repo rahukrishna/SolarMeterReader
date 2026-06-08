@@ -512,6 +512,7 @@ function App() {
   const [cloudUser, setCloudUser] = useState<User | null>(null)
   const [cloudBusy, setCloudBusy] = useState(false)
   const [cloudMessage, setCloudMessage] = useState('')
+  const [selectedBillingCycleKey, setSelectedBillingCycleKey] = useState<string | null>(null)
 
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
@@ -675,7 +676,10 @@ function App() {
         netConsumed: 0,
         solarAdded: 0,
         openingBank: 0,
+        bankUsed: 0,
+        bankAdded: 0,
         payableUnits: 0,
+        closingBank: 0,
         remainingBank: 0,
         totalImport: 0,
         totalExport: 0,
@@ -684,6 +688,59 @@ function App() {
       }
     }
 
+    // If a specific billing cycle is selected and found in billingCycles, use that
+    if (selectedBillingCycleKey) {
+      const selectedCycle = billingCycles.find((c) => c.key === selectedBillingCycleKey)
+      if (selectedCycle) {
+        const inCycle = sortReadings(
+          sortedReadings.filter((reading) => {
+            const date = dayjs(reading.date)
+            return (
+              (date.isSame(dayjs(selectedCycle.start)) ||
+                date.isAfter(dayjs(selectedCycle.start))) &&
+              (date.isSame(dayjs(selectedCycle.end)) ||
+                date.isBefore(dayjs(selectedCycle.end)))
+            )
+          }),
+        )
+
+        const first = inCycle[0]
+        const last = inCycle[inCycle.length - 1]
+
+        let importConsumed = 0
+        let exportConsumed = 0
+        let solarAdded = 0
+
+        if (first && last && inCycle.length > 1) {
+          importConsumed = calculateImportTotal(last) - calculateImportTotal(first)
+          exportConsumed = calculateExportTotal(last) - calculateExportTotal(first)
+          solarAdded = last.solarGenerated - first.solarGenerated
+        }
+
+        const netConsumed = importConsumed - exportConsumed
+
+        return {
+          periodLabel: `${dayjs(selectedCycle.start).format('DD MMM YYYY')} - ${dayjs(selectedCycle.end).format('DD MMM YYYY')}`,
+          readingsCount: inCycle.length,
+          importConsumed,
+          exportConsumed,
+          netConsumed,
+          solarAdded,
+          openingBank: selectedCycle.openingBank,
+          bankUsed: selectedCycle.bankUsed,
+          bankAdded: selectedCycle.bankAdded,
+          payableUnits: selectedCycle.payableUnits,
+          closingBank: selectedCycle.closingBank,
+          remainingBank: selectedCycle.closingBank,
+          totalImport: last ? calculateImportTotal(last) : 0,
+          totalExport: last ? calculateExportTotal(last) : 0,
+          totalNet: last ? calculateNet(last) : 0,
+          totalSolar: last ? last.solarGenerated : 0,
+        }
+      }
+    }
+
+    // Default: use current month based on latest reading
     const bounds = getCycleBoundaries(latest.date, billingDay)
     const inCycle = sortReadings(
       sortedReadings.filter((reading) => {
@@ -713,6 +770,12 @@ function App() {
     const payableUnits = Math.max(netConsumed - openingBank, 0)
     const remainingBank = Math.max(openingBank - netConsumed, 0)
 
+    // Get the current month's cycle data from billingCycles if available
+    const currentCycle = billingCycles.find((c) => c.key === bounds.key)
+    const bankUsed = currentCycle?.bankUsed ?? 0
+    const bankAdded = currentCycle?.bankAdded ?? 0
+    const closingBank = currentCycle?.closingBank ?? remainingBank
+
     return {
       periodLabel: `${dayjs(bounds.start).format('DD MMM YYYY')} - ${dayjs(bounds.end).format('DD MMM YYYY')}`,
       readingsCount: inCycle.length,
@@ -721,14 +784,17 @@ function App() {
       netConsumed,
       solarAdded,
       openingBank,
+      bankUsed,
+      bankAdded,
       payableUnits,
+      closingBank,
       remainingBank,
       totalImport: calculateImportTotal(latest),
       totalExport: calculateExportTotal(latest),
       totalNet: calculateNet(latest),
       totalSolar: latest.solarGenerated,
     }
-  }, [sortedReadings, billingDay])
+  }, [sortedReadings, billingDay, billingCycles, selectedBillingCycleKey])
 
   const currentBank = billingCycles.length
     ? billingCycles[billingCycles.length - 1].closingBank
@@ -1173,6 +1239,30 @@ function App() {
           </p>
         </div>
 
+        <div style={{ marginBottom: '1rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <span>Select Month:</span>
+            <select
+              value={selectedBillingCycleKey ?? ''}
+              onChange={(e) => setSelectedBillingCycleKey(e.target.value || null)}
+              style={{
+                padding: '0.5rem 0.75rem',
+                borderRadius: '4px',
+                border: '1px solid #ccc',
+                fontSize: '1rem',
+              }}
+            >
+              <option value="">Current Month</option>
+              {billingCycles.map((cycle) => (
+                <option key={cycle.key} value={cycle.key}>
+                  {dayjs(cycle.start).format('MMM YYYY')} (
+                  {dayjs(cycle.start).format('DD')} - {dayjs(cycle.end).format('DD MMM')})
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
         <div className="critical-tiles">
           <article className="critical-tile payable">
             <h3>Payable Units</h3>
@@ -1218,13 +1308,17 @@ function App() {
                 <span>Opening Bank</span>
                 <strong>{formatUnits(currentMonthTracker.openingBank)}</strong>
               </div>
+              <div>
+                <span>Units Consumed from Bank</span>
+                <strong>{formatUnits(currentMonthTracker.bankUsed)}</strong>
+              </div>
               <div className="payable-focus">
                 <span>Payable Units</span>
                 <strong>{formatUnits(currentMonthTracker.payableUnits)}</strong>
               </div>
               <div>
-                <span>Remaining Bank</span>
-                <strong>{formatUnits(currentMonthTracker.remainingBank)}</strong>
+                <span>Bank Balance</span>
+                <strong>{formatUnits(currentMonthTracker.closingBank)}</strong>
               </div>
             </div>
           </article>
