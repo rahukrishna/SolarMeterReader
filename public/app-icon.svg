@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Solar Meter Reader icon">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#183e54"/>
+      <stop offset="1" stop-color="#2b6f78"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#a4efe4"/>
+      <stop offset="1" stop-color="#4aa7b0"/>
+    </linearGradient>
+    <linearGradient id="meter" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#fff7dc"/>
+      <stop offset="1" stop-color="#efd6a0"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="88" height="88" rx="24" fill="url(#bg)"/>
+  <circle cx="29" cy="30" r="9" fill="#ffd56f"/>
+  <circle cx="29" cy="30" r="14" fill="none" stroke="#ffd56f" stroke-opacity="0.25" stroke-width="3"/>
+  <polygon points="28,48 43,36 58,48" fill="#bde8ef" opacity="0.9"/>
+  <rect x="19" y="49" width="40" height="20" rx="5" fill="url(#panel)" transform="skewX(-10)"/>
+  <rect x="57" y="43" width="17" height="31" rx="8" fill="url(#meter)"/>
+  <rect x="61" y="49" width="9" height="7" rx="3" fill="#325f74"/>
+</svg>

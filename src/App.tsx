@@ -1,4 +1,5 @@
 import dayjs from 'dayjs'
+import customParseFormat from 'dayjs/plugin/customParseFormat'
 import { type ChangeEvent, type FormEvent, useEffect, useMemo, useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import {
@@ -15,7 +16,9 @@ import {
 import './App.css'
 import { isCloudEnabled, supabase } from './lib/supabase'
 
-type BillingDay = 1 | 2
+dayjs.extend(customParseFormat)
+
+type BillingDay = number
 
 type RangePreset =
   | '2D'
@@ -96,6 +99,7 @@ type ActivityLogEntry = {
 }
 
 type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
+type AppTab = 'home' | 'analytics' | 'history' | 'cloud' | 'manage'
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
@@ -178,6 +182,13 @@ const presetLabels: Record<RangePreset, string> = {
 const toNum = (value: string) => {
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+const normalizeBillingDay = (value: number) => {
+  if (!Number.isFinite(value)) {
+    return 1
+  }
+  return Math.min(28, Math.max(1, Math.floor(value)))
 }
 
 const calculateImportTotal = (reading: Reading) =>
@@ -349,11 +360,12 @@ const getPresetStartDate = (preset: RangePreset, maxDate: string) => {
 }
 
 const getCycleBoundaries = (dateValue: string, billingDay: BillingDay) => {
+  const normalizedBillingDay = normalizeBillingDay(billingDay)
   const date = dayjs(dateValue)
   const start =
-    date.date() >= billingDay
-      ? date.date(billingDay)
-      : date.subtract(1, 'month').date(billingDay)
+    date.date() >= normalizedBillingDay
+      ? date.date(normalizedBillingDay)
+      : date.subtract(1, 'month').date(normalizedBillingDay)
   const end = start.add(1, 'month').subtract(1, 'day')
   return {
     key: `${start.format('YYYY-MM-DD')}_${end.format('YYYY-MM-DD')}`,
@@ -363,9 +375,10 @@ const getCycleBoundaries = (dateValue: string, billingDay: BillingDay) => {
 }
 
 const buildFinancialYearCycles = (anchorDate: string, billingDay: BillingDay) => {
+  const normalizedBillingDay = normalizeBillingDay(billingDay)
   const anchor = dayjs(anchorDate)
   const fyStartYear = anchor.month() >= 3 ? anchor.year() : anchor.year() - 1
-  const fyStart = dayjs(`${fyStartYear}-04-${billingDay.toString().padStart(2, '0')}`)
+  const fyStart = dayjs(`${fyStartYear}-04-${normalizedBillingDay.toString().padStart(2, '0')}`)
 
   return Array.from({ length: 12 }, (_, index) => {
     const start = fyStart.add(index, 'month')
@@ -518,6 +531,183 @@ const parseOptionalNet = (value: string) => {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+type ParsedBillData = {
+  billDate?: string
+  billGeneratedAt?: string
+  importT?: number
+  exportT?: number
+  net?: number
+  importT1?: number
+  importT2?: number
+  importT3?: number
+  exportT1?: number
+  exportT2?: number
+  exportT3?: number
+}
+
+const toNormalizedText = (text: string) => text.replace(/\r/g, '\n').replace(/[\t ]+/g, ' ')
+
+const parseNumeric = (value: string) => {
+  const cleaned = value.replace(/,/g, '').trim()
+  const parsed = Number(cleaned)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+const parseDateCandidate = (value: string) => {
+  const cleaned = value.trim().replace(/[.,]$/, '')
+  const formats = [
+    'DD/MM/YYYY',
+    'D/M/YYYY',
+    'DD-MM-YYYY',
+    'D-M-YYYY',
+    'YYYY-MM-DD',
+    'DD.MM.YYYY',
+    'D.M.YYYY',
+    'DD MMM YYYY',
+    'D MMM YYYY',
+    'DD-MMM-YYYY',
+    'D-MMM-YYYY',
+  ]
+
+  for (const format of formats) {
+    const parsed = dayjs(cleaned, format, true)
+    if (parsed.isValid()) {
+      return parsed.format('YYYY-MM-DD')
+    }
+  }
+
+  const fallback = dayjs(cleaned)
+  return fallback.isValid() ? fallback.format('YYYY-MM-DD') : undefined
+}
+
+const extractDateByLabels = (text: string, labels: string[]) => {
+  const datePattern = '(\\d{1,2}[\\/.-]\\d{1,2}[\\/.-]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}\\s+[A-Za-z]{3,9}\\s+\\d{4})'
+  for (const label of labels) {
+    const expression = new RegExp(`${label}[^\\n\\d]{0,25}${datePattern}`, 'i')
+    const match = text.match(expression)
+    if (match?.[1]) {
+      const parsed = parseDateCandidate(match[1])
+      if (parsed) {
+        return parsed
+      }
+    }
+  }
+  return undefined
+}
+
+const extractNumberByLabels = (text: string, labels: string[]) => {
+  for (const label of labels) {
+    const expression = new RegExp(`${label}[^\\n\\d-]{0,30}(-?\\d[\\d,]*(?:\\.\\d+)?)`, 'i')
+    const match = text.match(expression)
+    if (match?.[1]) {
+      const parsed = parseNumeric(match[1])
+      if (parsed !== undefined) {
+        return parsed
+      }
+    }
+  }
+  return undefined
+}
+
+const parseKsebBillText = (rawText: string): ParsedBillData => {
+  const text = toNormalizedText(rawText)
+
+  const billDate = extractDateByLabels(text, [
+    'bill\\s*date',
+    'reading\\s*date',
+    'current\\s*reading\\s*date',
+    'billing\\s*date',
+  ])
+
+  const generatedDate = extractDateByLabels(text, [
+    'bill\\s*generated\\s*(?:on|date)?',
+    'generated\\s*on',
+    'issue\\s*date',
+  ])
+
+  const importT = extractNumberByLabels(text, [
+    'import\\s*(?:reading|total|units|kwh)',
+    'kseb\\s*import',
+    'imp\\s*(?:total|reading)',
+  ])
+
+  const exportT = extractNumberByLabels(text, [
+    'export\\s*(?:reading|total|units|kwh)',
+    'kseb\\s*export',
+    'exp\\s*(?:total|reading)',
+  ])
+
+  const net = extractNumberByLabels(text, ['net\\s*(?:units|kwh|reading|usage)'])
+
+  const importT1 = extractNumberByLabels(text, ['import\\s*t1', 'imp\\s*t1', 't1\\s*import'])
+  const importT2 = extractNumberByLabels(text, ['import\\s*t2', 'imp\\s*t2', 't2\\s*import'])
+  const importT3 = extractNumberByLabels(text, ['import\\s*t3', 'imp\\s*t3', 't3\\s*import'])
+
+  const exportT1 = extractNumberByLabels(text, ['export\\s*t1', 'exp\\s*t1', 't1\\s*export'])
+  const exportT2 = extractNumberByLabels(text, ['export\\s*t2', 'exp\\s*t2', 't2\\s*export'])
+  const exportT3 = extractNumberByLabels(text, ['export\\s*t3', 'exp\\s*t3', 't3\\s*export'])
+
+  const billGeneratedAt = generatedDate ? `${generatedDate}T${dayjs().format('HH:mm')}` : undefined
+
+  return {
+    billDate,
+    billGeneratedAt,
+    importT,
+    exportT,
+    net,
+    importT1,
+    importT2,
+    importT3,
+    exportT1,
+    exportT2,
+    exportT3,
+  }
+}
+
+const extractTextFromPdf = async (file: File) => {
+  const pdfjs = await import('pdfjs-dist')
+  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`
+
+  const data = new Uint8Array(await file.arrayBuffer())
+  const pdf = await pdfjs.getDocument({ data }).promise
+  const chunks: string[] = []
+
+  for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex += 1) {
+    const page = await pdf.getPage(pageIndex)
+    const textContent = await page.getTextContent()
+    const pageText = textContent.items
+      .map((item) => ('str' in item ? item.str : ''))
+      .join(' ')
+    chunks.push(pageText)
+  }
+
+  return chunks.join('\n')
+}
+
+const extractTextFromImage = async (file: File) => {
+  const { createWorker } = await import('tesseract.js')
+  const worker = await createWorker('eng')
+
+  try {
+    const {
+      data: { text },
+    } = await worker.recognize(file)
+    return text
+  } finally {
+    await worker.terminate()
+  }
+}
+
+const extractBillText = async (file: File) => {
+  const lowerName = file.name.toLowerCase()
+  if (file.type.includes('pdf') || lowerName.endsWith('.pdf')) {
+    return extractTextFromPdf(file)
+  }
+  return extractTextFromImage(file)
+}
+
+const defaultBillGeneratedAt = () => dayjs().format('YYYY-MM-DDTHH:mm')
+
 const toPercent = (value: number) => `${value.toFixed(1)}%`
 
 const formatSigned = (value: number) => (value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2))
@@ -548,6 +738,14 @@ function App() {
   const [installPromptEvent, setInstallPromptEvent] =
     useState<BeforeInstallPromptEvent | null>(null)
   const [updateMessage, setUpdateMessage] = useState('')
+  const [isReadingModalOpen, setIsReadingModalOpen] = useState(false)
+  const [readingFormErrors, setReadingFormErrors] = useState<string[]>([])
+  const [appToast, setAppToast] = useState('')
+  const [activeTab, setActiveTab] = useState<AppTab>('home')
+  const [billingReferenceDate, setBillingReferenceDate] = useState(dayjs().format('YYYY-MM-DD'))
+  const [billGeneratedAt, setBillGeneratedAt] = useState(defaultBillGeneratedAt)
+  const [billImportBusy, setBillImportBusy] = useState(false)
+  const [billImportMessage, setBillImportMessage] = useState('')
 
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
@@ -584,10 +782,16 @@ function App() {
         billingDay: BillingDay
         monthlyPayableGoal?: number
         monthlyImportGoal?: number
+        billingReferenceDate?: string
+        billGeneratedAt?: string
       }
-      setBillingDay(parsedSettings.billingDay ?? 1)
+      setBillingDay(normalizeBillingDay(parsedSettings.billingDay ?? 1))
       setMonthlyPayableGoal(String(parsedSettings.monthlyPayableGoal ?? 0))
       setMonthlyImportGoal(String(parsedSettings.monthlyImportGoal ?? 0))
+      setBillingReferenceDate(
+        parsedSettings.billingReferenceDate ?? dayjs().format('YYYY-MM-DD'),
+      )
+      setBillGeneratedAt(parsedSettings.billGeneratedAt ?? defaultBillGeneratedAt())
     }
 
     const rawLog = localStorage.getItem(ACTIVITY_LOG_KEY)
@@ -639,9 +843,18 @@ function App() {
         billingDay,
         monthlyPayableGoal: Number(monthlyPayableGoal) || 0,
         monthlyImportGoal: Number(monthlyImportGoal) || 0,
+        billingReferenceDate,
+        billGeneratedAt,
       }),
     )
-  }, [billingDay, isHydrated, monthlyImportGoal, monthlyPayableGoal])
+  }, [
+    billingDay,
+    isHydrated,
+    monthlyImportGoal,
+    monthlyPayableGoal,
+    billingReferenceDate,
+    billGeneratedAt,
+  ])
 
   useEffect(() => {
     if (!isHydrated) {
@@ -667,6 +880,20 @@ function App() {
       setShowManualSyncTools(true)
     }
   }, [syncStatus, pendingSyncChanges])
+
+  useEffect(() => {
+    if (!appToast) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setAppToast('')
+    }, 3200)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [appToast])
 
   const sortedReadings = useMemo(() => sortReadings(readings), [readings])
   const derivedReadings = useMemo(() => deriveReadings(sortedReadings), [sortedReadings])
@@ -1045,6 +1272,193 @@ function App() {
     }
   }
 
+  const saveBillingConfigFromBill = () => {
+    if (!billingReferenceDate) {
+      setAppToast('Please enter KSEB billing date first.')
+      return
+    }
+
+    const nextBillingDay = normalizeBillingDay(dayjs(billingReferenceDate).date())
+    setBillingDay(nextBillingDay)
+
+    const cycle = getCycleBoundaries(billingReferenceDate, nextBillingDay)
+    setSelectedBillingCycleKey(cycle.key)
+    setRangePreset('CUSTOM')
+    setCustomStart(cycle.start)
+    setCustomEnd(cycle.end)
+    setAppToast(`Billing cycle updated from bill date (${dayjs(billingReferenceDate).format('DD MMM YYYY')}).`)
+  }
+
+  const applyBillingDateToCycle = (date: string) => {
+    const nextBillingDay = normalizeBillingDay(dayjs(date).date())
+    setBillingDay(nextBillingDay)
+
+    const cycle = getCycleBoundaries(date, nextBillingDay)
+    setSelectedBillingCycleKey(cycle.key)
+    setRangePreset('CUSTOM')
+    setCustomStart(cycle.start)
+    setCustomEnd(cycle.end)
+  }
+
+  const autoFillFromParsedBill = (parsed: ParsedBillData, fileName: string) => {
+    const resolvedImportT = parsed.importT
+    const resolvedExportT = parsed.exportT
+
+    const nextDate = parsed.billDate ?? dayjs().format('YYYY-MM-DD')
+    const nextTime = parsed.billGeneratedAt
+      ? dayjs(parsed.billGeneratedAt).format('HH:mm')
+      : dayjs().format('HH:mm')
+
+    setEditingReadingId(null)
+    setReadingFormErrors([])
+    setFormState((prev) => ({
+      ...prev,
+      date: nextDate,
+      time: nextTime,
+      importT: resolvedImportT !== undefined ? String(resolvedImportT) : prev.importT,
+      exportT: resolvedExportT !== undefined ? String(resolvedExportT) : prev.exportT,
+      net: parsed.net !== undefined ? String(parsed.net) : prev.net,
+      importT1: parsed.importT1 !== undefined ? String(parsed.importT1) : prev.importT1,
+      importT2: parsed.importT2 !== undefined ? String(parsed.importT2) : prev.importT2,
+      importT3: parsed.importT3 !== undefined ? String(parsed.importT3) : prev.importT3,
+      exportT1: parsed.exportT1 !== undefined ? String(parsed.exportT1) : prev.exportT1,
+      exportT2: parsed.exportT2 !== undefined ? String(parsed.exportT2) : prev.exportT2,
+      exportT3: parsed.exportT3 !== undefined ? String(parsed.exportT3) : prev.exportT3,
+      note: `Auto-read from bill: ${fileName}`,
+    }))
+
+    if (parsed.billDate) {
+      setBillingReferenceDate(parsed.billDate)
+      applyBillingDateToCycle(parsed.billDate)
+    }
+
+    if (parsed.billGeneratedAt) {
+      setBillGeneratedAt(parsed.billGeneratedAt)
+    }
+
+    setIsReadingModalOpen(true)
+    setAppToast('Bill parsed. Verify values and tap Save Reading.')
+  }
+
+  const importKsebBillFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    event.target.value = ''
+    setBillImportBusy(true)
+    setBillImportMessage('Extracting bill details...')
+
+    try {
+      const extractedText = await extractBillText(file)
+      const parsed = parseKsebBillText(extractedText)
+
+      const foundAnyValue =
+        parsed.billDate !== undefined ||
+        parsed.importT !== undefined ||
+        parsed.exportT !== undefined ||
+        parsed.net !== undefined ||
+        parsed.importT1 !== undefined ||
+        parsed.importT2 !== undefined ||
+        parsed.importT3 !== undefined ||
+        parsed.exportT1 !== undefined ||
+        parsed.exportT2 !== undefined ||
+        parsed.exportT3 !== undefined
+
+      if (!foundAnyValue) {
+        setBillImportMessage('Could not detect bill fields. Please add values manually.')
+        return
+      }
+
+      autoFillFromParsedBill(parsed, file.name)
+
+      const summary = [
+        parsed.billDate ? `Date ${dayjs(parsed.billDate).format('DD MMM YYYY')}` : null,
+        parsed.importT !== undefined ? `Import ${parsed.importT}` : null,
+        parsed.exportT !== undefined ? `Export ${parsed.exportT}` : null,
+      ]
+        .filter(Boolean)
+        .join(' | ')
+
+      setBillImportMessage(summary ? `Detected: ${summary}` : 'Detected bill details and filled reading form.')
+      logActivity('import-kseb-bill', `Parsed bill file ${file.name}`)
+    } catch (error) {
+      setBillImportMessage(
+        `Bill parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      )
+    } finally {
+      setBillImportBusy(false)
+    }
+  }
+
+  const openAddReadingModal = () => {
+    setEditingReadingId(null)
+    setFormState(defaultFormState())
+    setReadingFormErrors([])
+    setIsReadingModalOpen(true)
+  }
+
+  const validateReadingForm = () => {
+    const errors: string[] = []
+
+    if (!formState.date.trim()) {
+      errors.push('Date is required.')
+    }
+
+    if (!formState.time.trim()) {
+      errors.push('Time is required.')
+    }
+
+    const readingMoment = dayjs(`${formState.date}T${formState.time || '00:00'}`)
+    if (!readingMoment.isValid()) {
+      errors.push('Please enter a valid date and time.')
+      return errors
+    }
+
+    const importTZTotal =
+      toNum(formState.importT1) + toNum(formState.importT2) + toNum(formState.importT3)
+    const exportTZTotal =
+      toNum(formState.exportT1) + toNum(formState.exportT2) + toNum(formState.exportT3)
+    const enteredImportT = parseOptionalTotal(formState.importT)
+    const enteredExportT = parseOptionalTotal(formState.exportT)
+
+    const effectiveImportT = enteredImportT ?? importTZTotal
+    const effectiveExportT = enteredExportT ?? exportTZTotal
+
+    if (effectiveImportT === 0 && effectiveExportT === 0 && toNum(formState.solarGenerated) === 0) {
+      errors.push('Import, export, and solar cannot all be zero. Please verify values.')
+    }
+
+    const comparableReadings = editingReadingId
+      ? sortedReadings.filter((reading) => reading.id !== editingReadingId)
+      : sortedReadings
+
+    const previousReading = [...comparableReadings]
+      .filter((reading) => getReadingTimestamp(reading) <= readingMoment.valueOf())
+      .sort((a, b) => getReadingTimestamp(b) - getReadingTimestamp(a))[0]
+
+    if (previousReading) {
+      const prevImportTotal = calculateImportTotal(previousReading)
+      const prevExportTotal = calculateExportTotal(previousReading)
+      const prevSolarTotal = previousReading.solarGenerated
+
+      if (effectiveImportT < prevImportTotal) {
+        errors.push('Import total is less than previous reading. Please check entry.')
+      }
+
+      if (effectiveExportT < prevExportTotal) {
+        errors.push('Export total is less than previous reading. Please check entry.')
+      }
+
+      if (toNum(formState.solarGenerated) < prevSolarTotal) {
+        errors.push('Solar generated is less than previous reading. Please check entry.')
+      }
+    }
+
+    return errors
+  }
+
   const handleFieldChange =
     (field: keyof ReadingFormState) =>
     (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -1056,6 +1470,13 @@ function App() {
 
   const handleAddReading = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+
+    const validationErrors = validateReadingForm()
+    setReadingFormErrors(validationErrors)
+    if (validationErrors.length > 0) {
+      setAppToast('Please fix the highlighted issues before saving.')
+      return
+    }
 
     const importTZTotal =
       toNum(formState.importT1) + toNum(formState.importT2) + toNum(formState.importT3)
@@ -1094,6 +1515,9 @@ function App() {
     setReadings(nextReadings)
     setFormState(defaultFormState())
     markLocalChange()
+    setReadingFormErrors([])
+    setIsReadingModalOpen(false)
+    setAppToast(editingReadingId ? 'Reading updated successfully.' : 'Reading added successfully.')
     logActivity(
       editingReadingId ? 'edit-reading' : 'add-reading',
       `${dayjs(next.date).format('DD MMM YYYY')} ${next.time}`,
@@ -1146,6 +1570,7 @@ function App() {
 
   const startEditingReading = (reading: Reading) => {
     setEditingReadingId(reading.id)
+    setReadingFormErrors([])
     setFormState({
       date: reading.date,
       time: reading.time,
@@ -1161,11 +1586,14 @@ function App() {
       solarGenerated: reading.solarGenerated.toString(),
       note: reading.note ?? '',
     })
+    setIsReadingModalOpen(true)
   }
 
   const cancelEditing = () => {
     setEditingReadingId(null)
     setFormState(defaultFormState())
+    setReadingFormErrors([])
+    setIsReadingModalOpen(false)
   }
 
   const exportData = () => {
@@ -1628,6 +2056,52 @@ function App() {
         </div>
       </header>
 
+      <nav className="app-tabs" aria-label="App sections">
+        <button
+          type="button"
+          className={activeTab === 'home' ? 'tab-button active' : 'tab-button'}
+          onClick={() => setActiveTab('home')}
+        >
+          Home
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'analytics' ? 'tab-button active' : 'tab-button'}
+          onClick={() => setActiveTab('analytics')}
+        >
+          Insights
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'history' ? 'tab-button active' : 'tab-button'}
+          onClick={() => setActiveTab('history')}
+        >
+          History
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'cloud' ? 'tab-button active' : 'tab-button'}
+          onClick={() => setActiveTab('cloud')}
+        >
+          Cloud
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'manage' ? 'tab-button active' : 'tab-button'}
+          onClick={() => setActiveTab('manage')}
+        >
+          Manage
+        </button>
+      </nav>
+
+      <div className="quick-add-bar">
+        <button type="button" className="quick-add-button" onClick={openAddReadingModal}>
+          + Add Reading
+        </button>
+      </div>
+
+      {activeTab === 'home' && (
+      <>
       <section className="cards-grid">
         <article className="card kpi">
           <h2>Import Used</h2>
@@ -1651,17 +2125,51 @@ function App() {
         </article>
       </section>
 
+      </>
+      )}
+
+      {activeTab === 'manage' && (
       <section className="card controls">
         <div className="controls-row">
           <label>
             Billing Day
-            <select
+            <input
+              type="number"
+              min={1}
+              max={28}
               value={billingDay}
-              onChange={(event) => setBillingDay(Number(event.target.value) as BillingDay)}
-            >
-              <option value={1}>1st of Month</option>
-              <option value={2}>2nd of Month</option>
-            </select>
+              onChange={(event) => setBillingDay(normalizeBillingDay(Number(event.target.value)))}
+            />
+          </label>
+          <label>
+            KSEB Billing Date
+            <input
+              type="date"
+              value={billingReferenceDate}
+              onChange={(event) => setBillingReferenceDate(event.target.value)}
+            />
+          </label>
+          <label>
+            Bill Generated DateTime
+            <input
+              type="datetime-local"
+              value={billGeneratedAt}
+              onChange={(event) => setBillGeneratedAt(event.target.value)}
+            />
+          </label>
+          <button type="button" onClick={saveBillingConfigFromBill}>
+            Apply Bill Cycle
+          </button>
+          <label>
+            Upload KSEB Bill (PDF/Image)
+            <input
+              type="file"
+              accept="application/pdf,image/*"
+              onChange={(event) => {
+                void importKsebBillFromFile(event)
+              }}
+              disabled={billImportBusy}
+            />
           </label>
           <button type="button" onClick={exportData} className="ghost">
             Export JSON Backup
@@ -1690,8 +2198,24 @@ function App() {
             {lastSyncAt ? dayjs(lastSyncAt).format('DD MMM YYYY HH:mm') : 'Never'}
           </span>
         </div>
+
+        <p className="field-hint">
+          Applied bill date: {dayjs(billingReferenceDate).format('DD MMM YYYY')} | Generated:{' '}
+          {dayjs(billGeneratedAt).isValid()
+            ? dayjs(billGeneratedAt).format('DD MMM YYYY HH:mm')
+            : '-'}
+        </p>
+        <p className="field-hint">
+          {billImportBusy
+            ? 'Processing bill...'
+            : billImportMessage ||
+              'Upload a KSEB bill and the app will detect date/import/export values, then pre-fill Add Reading for review.'}
+        </p>
       </section>
 
+      )}
+
+      {activeTab === 'cloud' && (
       <section className="card cloud-sync">
         <div className="section-head">
           <h2>Cloud Sync (Free)</h2>
@@ -1809,6 +2333,11 @@ function App() {
         )}
       </section>
 
+      )}
+
+      {activeTab === 'home' && (
+      <>
+
       <section className="card month-tracker">
         <div className="section-head">
           <h2>Current Month Usage</h2>
@@ -1921,185 +2450,217 @@ function App() {
       </section>
 
       <section className="card form-card">
-        <h2>{editingReadingId ? 'Edit Reading' : 'Add Daily Reading'}</h2>
-        <div className="inline-actions">
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              setFormState((prev) => ({
-                ...prev,
-                date: dayjs().format('YYYY-MM-DD'),
-                time: defaultReadingTime(),
-              }))
-            }}
-          >
-            Use Current Date/Time
+        <div className="section-head">
+          <h2>Reading Entry</h2>
+          <button type="button" onClick={openAddReadingModal}>
+            Add Reading
           </button>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              const latest = sortedReadings[sortedReadings.length - 1]
-              if (!latest) {
-                return
-              }
-              setFormState((prev) => ({
-                ...prev,
-                importT: calculateImportTotal(latest).toString(),
-                exportT: calculateExportTotal(latest).toString(),
-                solarGenerated: latest.solarGenerated.toString(),
-              }))
-            }}
-          >
-            Copy Last Totals
-          </button>
-          {editingReadingId && (
-            <button type="button" className="ghost" onClick={cancelEditing}>
-              Cancel Edit
-            </button>
-          )}
         </div>
-        <form onSubmit={handleAddReading} className="reading-form">
-          <label>
-            Date
-            <input
-              type="date"
-              value={formState.date}
-              onChange={handleFieldChange('date')}
-              required
-            />
-          </label>
-          <label>
-            Time
-            <input
-              type="time"
-              value={formState.time}
-              onChange={handleFieldChange('time')}
-              required
-            />
-          </label>
-          <label>
-            Import T (Total)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.importT}
-              onChange={handleFieldChange('importT')}
-            />
-            <span className="field-hint">T1 + T2 + T3 = {formImportTZTotal.toFixed(2)}</span>
-          </label>
-          <label>
-            Import T1 (6 AM - 6 PM)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.importT1}
-              onChange={handleFieldChange('importT1')}
-            />
-          </label>
-          <label>
-            Import T2 (6 PM - 10 PM)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.importT2}
-              onChange={handleFieldChange('importT2')}
-            />
-          </label>
-          <label>
-            Import T3 (10 PM - 6 AM)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.importT3}
-              onChange={handleFieldChange('importT3')}
-            />
-          </label>
-          <label>
-            Export T (Total)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.exportT}
-              onChange={handleFieldChange('exportT')}
-            />
-            <span className="field-hint">T1 + T2 + T3 = {formExportTZTotal.toFixed(2)}</span>
-          </label>
-          <label>
-            Export T1
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.exportT1}
-              onChange={handleFieldChange('exportT1')}
-            />
-          </label>
-          <label>
-            Export T2 (usually 0)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.exportT2}
-              onChange={handleFieldChange('exportT2')}
-            />
-          </label>
-          <label>
-            Export T3 (usually 0)
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.exportT3}
-              onChange={handleFieldChange('exportT3')}
-            />
-          </label>
-          <label>
-            Net N (can be + or -)
-            <input
-              type="number"
-              step="0.01"
-              value={formState.net}
-              onChange={handleFieldChange('net')}
-            />
-            <span className="field-hint">Import T - Export T = {derivedNet.toFixed(2)}</span>
-          </label>
-          <label>
-            Solar Generated
-            <input
-              type="number"
-              step="0.01"
-              min="0"
-              value={formState.solarGenerated}
-              onChange={handleFieldChange('solarGenerated')}
-            />
-          </label>
-          <label className="note-field">
-            Note
-            <textarea
-              value={formState.note}
-              onChange={handleFieldChange('note')}
-              placeholder="Optional"
-            />
-          </label>
-          {(showImportMismatch || showExportMismatch || showNetMismatch) && (
-            <p className="form-hint">
-              Note: Entered values differ from derived values. T and Net can be entered
-              manually; usage and billing are computed from change between consecutive
-              readings.
-            </p>
-          )}
-          <button type="submit">{editingReadingId ? 'Save Reading' : 'Add Reading'}</button>
-        </form>
+        <p className="field-hint">
+          Tap Add Reading to open a quick entry popup. You will get alerts if any values
+          are missing or incorrect.
+        </p>
       </section>
 
+      </>
+      )}
+
+      {isReadingModalOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Add reading">
+          <section className="modal-sheet">
+            <div className="section-head">
+              <h2>{editingReadingId ? 'Edit Reading' : 'Add Daily Reading'}</h2>
+              <button type="button" className="ghost" onClick={cancelEditing}>
+                Close
+              </button>
+            </div>
+
+            <div className="inline-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setFormState((prev) => ({
+                    ...prev,
+                    date: dayjs().format('YYYY-MM-DD'),
+                    time: defaultReadingTime(),
+                  }))
+                }}
+              >
+                Use Current Date/Time
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  const latest = sortedReadings[sortedReadings.length - 1]
+                  if (!latest) {
+                    return
+                  }
+                  setFormState((prev) => ({
+                    ...prev,
+                    importT: calculateImportTotal(latest).toString(),
+                    exportT: calculateExportTotal(latest).toString(),
+                    solarGenerated: latest.solarGenerated.toString(),
+                  }))
+                }}
+              >
+                Copy Last Totals
+              </button>
+            </div>
+
+            {readingFormErrors.length > 0 && (
+              <div className="form-errors" role="alert">
+                {readingFormErrors.map((error) => (
+                  <p key={error}>{error}</p>
+                ))}
+              </div>
+            )}
+
+            <form onSubmit={handleAddReading} className="reading-form">
+              <label>
+                Date
+                <input
+                  type="date"
+                  value={formState.date}
+                  onChange={handleFieldChange('date')}
+                  required
+                />
+              </label>
+              <label>
+                Time
+                <input
+                  type="time"
+                  value={formState.time}
+                  onChange={handleFieldChange('time')}
+                  required
+                />
+              </label>
+              <label>
+                Import T (Total)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.importT}
+                  onChange={handleFieldChange('importT')}
+                />
+                <span className="field-hint">T1 + T2 + T3 = {formImportTZTotal.toFixed(2)}</span>
+              </label>
+              <label>
+                Import T1 (6 AM - 6 PM)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.importT1}
+                  onChange={handleFieldChange('importT1')}
+                />
+              </label>
+              <label>
+                Import T2 (6 PM - 10 PM)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.importT2}
+                  onChange={handleFieldChange('importT2')}
+                />
+              </label>
+              <label>
+                Import T3 (10 PM - 6 AM)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.importT3}
+                  onChange={handleFieldChange('importT3')}
+                />
+              </label>
+              <label>
+                Export T (Total)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.exportT}
+                  onChange={handleFieldChange('exportT')}
+                />
+                <span className="field-hint">T1 + T2 + T3 = {formExportTZTotal.toFixed(2)}</span>
+              </label>
+              <label>
+                Export T1
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.exportT1}
+                  onChange={handleFieldChange('exportT1')}
+                />
+              </label>
+              <label>
+                Export T2 (usually 0)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.exportT2}
+                  onChange={handleFieldChange('exportT2')}
+                />
+              </label>
+              <label>
+                Export T3 (usually 0)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.exportT3}
+                  onChange={handleFieldChange('exportT3')}
+                />
+              </label>
+              <label>
+                Net N (can be + or -)
+                <input
+                  type="number"
+                  step="0.01"
+                  value={formState.net}
+                  onChange={handleFieldChange('net')}
+                />
+                <span className="field-hint">Import T - Export T = {derivedNet.toFixed(2)}</span>
+              </label>
+              <label>
+                Solar Generated
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={formState.solarGenerated}
+                  onChange={handleFieldChange('solarGenerated')}
+                />
+              </label>
+              <label className="note-field">
+                Note
+                <textarea
+                  value={formState.note}
+                  onChange={handleFieldChange('note')}
+                  placeholder="Optional"
+                />
+              </label>
+              {(showImportMismatch || showExportMismatch || showNetMismatch) && (
+                <p className="form-hint">
+                  Note: Entered values differ from derived values. T and Net can be entered
+                  manually; usage and billing are computed from change between consecutive
+                  readings.
+                </p>
+              )}
+              <button type="submit">{editingReadingId ? 'Save Reading' : 'Add Reading'}</button>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {activeTab === 'analytics' && (
+      <>
       <section className="card">
         <div className="section-head">
           <h2>Alerts and Anomaly Detection</h2>
@@ -2345,6 +2906,11 @@ function App() {
         )}
       </section>
 
+      </>
+      )}
+
+      {activeTab === 'history' && (
+      <>
       <section className="card table-card">
         <h2>Billing Cycle Summary (Usage Deltas)</h2>
         <p className="section-note">
@@ -2526,6 +3092,53 @@ function App() {
           </table>
         </div>
       </section>
+
+      </>
+      )}
+
+      <button type="button" className="fab-add-reading" onClick={openAddReadingModal}>
+        + Add Reading
+      </button>
+
+      <nav className="app-bottom-nav" aria-label="Mobile app sections">
+        <button
+          type="button"
+          className={activeTab === 'home' ? 'bottom-tab active' : 'bottom-tab'}
+          onClick={() => setActiveTab('home')}
+        >
+          Home
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'analytics' ? 'bottom-tab active' : 'bottom-tab'}
+          onClick={() => setActiveTab('analytics')}
+        >
+          Insights
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'history' ? 'bottom-tab active' : 'bottom-tab'}
+          onClick={() => setActiveTab('history')}
+        >
+          History
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'cloud' ? 'bottom-tab active' : 'bottom-tab'}
+          onClick={() => setActiveTab('cloud')}
+        >
+          Cloud
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'manage' ? 'bottom-tab active' : 'bottom-tab'}
+          onClick={() => setActiveTab('manage')}
+        >
+          Manage
+        </button>
+      </nav>
+
+      {appToast && <div className="app-toast">{appToast}</div>}
 
       <footer className="footer-note">
         Data stays local in your browser by default, with optional cloud sync when enabled.

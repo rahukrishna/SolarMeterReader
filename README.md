@@ -6,8 +6,9 @@ A local-first web app to track solar + KSEB meter readings with:
 - Net units (Import - Export)
 - Solar generated units
 - Bank logic for exported surplus
-- Billing cycle (1st or 2nd day)
+- Billing cycle aligned to bill date (1-28 day)
 - March 31 settlement (bank payout then reset to 0)
+- KSEB bill upload (PDF/image) to auto-detect key fields and pre-fill reading form
 - Optional free cloud sync (Supabase + OTP login)
 - Flexible date filters: 2 days, 1 week, 2 weeks, 1 month, 6 months, 1 year, YTD, custom, all-time
 
@@ -51,7 +52,16 @@ npm run preview
 - If `Net > 0`: consume from bank first, remaining becomes payable units.
 - If `Net < 0`: add `abs(Net)` to bank.
 
-3. Settlement:
+3. Bill-driven cycle alignment:
+- In the Manage tab, set **KSEB Billing Date** and click **Apply Bill Cycle**.
+- The app updates billing day and range to match the selected bill cycle.
+
+4. Bill upload (PDF/Image):
+- In Manage tab, upload bill file using **Upload KSEB Bill (PDF/Image)**.
+- The app extracts available fields (date/import/export/T1-T3 where present) and opens Add Reading modal with pre-filled values.
+- Review values and save the reading.
+
+5. Settlement:
 - On cycle containing March 31, current bank is marked as settlement payout and bank is reset to 0.
 
 ## Backup

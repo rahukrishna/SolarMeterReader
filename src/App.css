@@ -11,6 +11,63 @@
   padding-bottom: 2rem;
 }
 
+.app-tabs {
+  position: sticky;
+  top: 0.4rem;
+  z-index: 25;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.45rem;
+  padding: 0.35rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid #d4e2e9;
+  backdrop-filter: blur(8px);
+}
+
+.tab-button {
+  border-radius: 10px;
+  border: 1px solid #c5d5df;
+  background: #f0f6f9;
+  color: #2a4d5f;
+  font-size: 0.84rem;
+  padding: 0.42rem 0.5rem;
+}
+
+.tab-button.active {
+  background: linear-gradient(140deg, #195d7c, #1f6f8a);
+  border-color: #1c6783;
+  color: #f7fbfd;
+}
+
+.quick-add-bar {
+  position: sticky;
+  top: 4.1rem;
+  z-index: 24;
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 0.2rem;
+}
+
+.quick-add-button {
+  border-radius: 999px;
+  border: none;
+  background: linear-gradient(135deg, #f18f01, #e36414);
+  color: #fff;
+  font-weight: 700;
+  padding: 0.56rem 1.04rem;
+  cursor: pointer;
+  box-shadow: 0 10px 18px -14px rgba(241, 143, 1, 0.95);
+}
+
+.quick-add-button:hover {
+  transform: translateY(-1px);
+}
+
+.app-bottom-nav {
+  display: none;
+}
+
 .hero {
   position: relative;
   overflow: hidden;
@@ -516,6 +573,64 @@ button.danger {
   padding: 0.45rem 0.6rem;
 }
 
+.form-errors {
+  margin: 0.5rem 0;
+  border: 1px solid #efb4b4;
+  background: #fff1f1;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+}
+
+.form-errors p {
+  margin: 0;
+  color: #8c2b2b;
+  font-size: 0.82rem;
+}
+
+.form-errors p + p {
+  margin-top: 0.3rem;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 31, 40, 0.58);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 80;
+}
+
+.modal-sheet {
+  width: min(960px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+  border-radius: 18px;
+  border: 1px solid #bfd1dc;
+  background: #fdfefe;
+  box-shadow: 0 28px 56px rgba(10, 28, 37, 0.24);
+  padding: 1rem;
+}
+
+.app-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  background: #163c52;
+  color: #f4f9fb;
+  border-radius: 999px;
+  border: 1px solid #2f6888;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.82rem;
+  z-index: 90;
+  box-shadow: 0 10px 24px rgba(9, 29, 40, 0.26);
+}
+
+.fab-add-reading {
+  display: none;
+}
+
 .section-head {
   display: flex;
   gap: 1rem;
@@ -880,12 +995,26 @@ th {
 
 @media (max-width: 640px) {
   #root {
-    padding: 0.7rem;
+    padding: 0.35rem;
+  }
+
+  .app-shell {
+    gap: 0.75rem;
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
+  }
+
+  .app-tabs {
+    display: none;
+  }
+
+  .quick-add-bar {
+    top: 0.2rem;
+    justify-content: center;
   }
 
   .hero {
     border-radius: 18px;
-    padding: 1.1rem;
+    padding: 0.95rem;
   }
 
   .hero-topline {
@@ -965,7 +1094,8 @@ th {
   }
 
   .card {
-    padding: 0.82rem;
+    padding: 0.78rem;
+    border-radius: 14px;
   }
 
   table {
@@ -990,5 +1120,77 @@ th {
 
   .goals-grid {
     grid-template-columns: 1fr;
+  }
+
+  .modal-overlay {
+    align-items: end;
+    padding: 0;
+  }
+
+  .modal-sheet {
+    width: 100%;
+    max-height: 90vh;
+    border-radius: 18px 18px 0 0;
+    padding: 0.85rem;
+  }
+
+  .form-card {
+    display: none;
+  }
+
+  .fab-add-reading {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    right: 12px;
+    bottom: calc(72px + env(safe-area-inset-bottom));
+    z-index: 70;
+    border-radius: 999px;
+    padding: 0.68rem 0.95rem;
+    background: linear-gradient(140deg, #186487, #144d67);
+    color: #f6fafc;
+    border: 1px solid #3f8cb0;
+    box-shadow: 0 16px 30px rgba(10, 31, 42, 0.3);
+    font-weight: 700;
+  }
+
+  .app-toast {
+    width: calc(100% - 24px);
+    text-align: center;
+    border-radius: 12px;
+    bottom: calc(132px + env(safe-area-inset-bottom));
+  }
+
+  .app-bottom-nav {
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    z-index: 75;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.35rem;
+    padding: 0.35rem;
+    border-radius: 14px;
+    border: 1px solid #bfd3df;
+    background: rgba(246, 251, 253, 0.96);
+    box-shadow: 0 12px 26px rgba(8, 26, 36, 0.22);
+    backdrop-filter: blur(8px);
+  }
+
+  .bottom-tab {
+    border-radius: 10px;
+    border: 1px solid #c8d6de;
+    background: #f1f7fa;
+    color: #294c5f;
+    font-size: 0.76rem;
+    padding: 0.42rem 0.35rem;
+  }
+
+  .bottom-tab.active {
+    background: linear-gradient(140deg, #1a607f, #215f72);
+    border-color: #1d647f;
+    color: #f4f9fb;
   }
 }
