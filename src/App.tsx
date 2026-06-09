@@ -91,11 +91,69 @@ type CloudReadingRow = {
   note: string | null
 }
 
+type CloudSolarUsageRow = {
+  id: string
+  user_id: string
+  logged_at: string
+  value_kwh: number
+  note: string | null
+  updated_at: string
+}
+
+type CloudSolarDailySummaryRow = {
+  user_id: string
+  summary_date: string
+  total_kwh: number
+  note: string | null
+  updated_at: string
+}
+
 type ActivityLogEntry = {
   id: string
   timestamp: string
   action: string
   details: string
+}
+
+type DailyForecastSnapshot = {
+  date: string
+  predictedImport: number
+  predictedExport: number
+  predictedSolar: number
+  predictedNet: number
+  createdAt: string
+}
+
+type ForecastAuditEntry = {
+  date: string
+  predictedImport: number
+  actualImport: number
+  predictedExport: number
+  actualExport: number
+  predictedSolar: number
+  actualSolar: number
+  predictedNet: number
+  actualNet: number
+  importErrorPct: number
+  exportErrorPct: number
+  solarErrorPct: number
+  netErrorPct: number
+  note: string
+  checkedAt: string
+}
+
+type SolarUsageEntry = {
+  id: string
+  timestamp: string
+  value: number
+  note?: string
+}
+
+type SolarDailySummary = {
+  date: string
+  total: number
+  note?: string
+  updatedAt: string
 }
 
 type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
@@ -114,6 +172,10 @@ const SETTINGS_KEY = 'solar-meter-settings-v1'
 const DATA_VERSION_KEY = 'solar-meter-data-version-v1'
 const ACTIVITY_LOG_KEY = 'solar-meter-activity-log-v1'
 const LAST_BACKUP_KEY = 'solar-meter-last-backup-v1'
+const DAILY_FORECAST_SNAPSHOT_KEY = 'solar-meter-daily-forecast-snapshots-v1'
+const FORECAST_AUDIT_KEY = 'solar-meter-forecast-audit-v1'
+const SOLAR_USAGE_LOG_KEY = 'solar-meter-solar-usage-log-v1'
+const SOLAR_DAILY_SUMMARY_KEY = 'solar-meter-solar-daily-summary-v1'
 const DATA_VERSION = 3
 
 const seededReadings: Reading[] = [
@@ -484,6 +546,258 @@ const summarizeBillingCycles = (
   return recordedCycles
 }
 
+type DailyUsagePoint = {
+  date: string
+  import: number
+  export: number
+  solar: number
+  net: number
+}
+
+const buildDailyUsageSeries = (items: DerivedReading[]) => {
+  const grouped = new Map<string, DailyUsagePoint>()
+
+  for (const row of items) {
+    const key = row.date
+    const existing = grouped.get(key)
+    if (!existing) {
+      grouped.set(key, {
+        date: key,
+        import: row.importDelta,
+        export: row.exportDelta,
+        solar: row.solarDelta,
+        net: row.netDelta,
+      })
+      continue
+    }
+
+    existing.import += row.importDelta
+    existing.export += row.exportDelta
+    existing.solar += row.solarDelta
+    existing.net += row.netDelta
+  }
+
+  return [...grouped.values()].sort((a, b) => a.date.localeCompare(b.date))
+}
+
+const buildNormalizedDailyUsageSeries = (items: DerivedReading[]) => {
+  if (items.length <= 1) {
+    return buildDailyUsageSeries(items)
+  }
+
+  const sorted = [...items].sort((a, b) => {
+    const delta = getReadingTimestamp(a) - getReadingTimestamp(b)
+    return delta !== 0 ? delta : a.id.localeCompare(b.id)
+  })
+
+  const grouped = new Map<string, DailyUsagePoint>()
+
+  const addUsage = (
+    date: string,
+    importValue: number,
+    exportValue: number,
+    solarValue: number,
+    netValue: number,
+  ) => {
+    const existing = grouped.get(date)
+    if (!existing) {
+      grouped.set(date, {
+        date,
+        import: importValue,
+        export: exportValue,
+        solar: solarValue,
+        net: netValue,
+      })
+      return
+    }
+
+    existing.import += importValue
+    existing.export += exportValue
+    existing.solar += solarValue
+    existing.net += netValue
+  }
+
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1]
+    const current = sorted[index]
+
+    const startDay = dayjs(previous.date)
+    const endDay = dayjs(current.date)
+    const gapDays = Math.max(1, endDay.startOf('day').diff(startDay.startOf('day'), 'day'))
+
+    const importPerDay = current.importDelta / gapDays
+    const exportPerDay = current.exportDelta / gapDays
+    const solarPerDay = current.solarDelta / gapDays
+    const netPerDay = current.netDelta / gapDays
+
+    if (gapDays === 1) {
+      addUsage(current.date, importPerDay, exportPerDay, solarPerDay, netPerDay)
+      continue
+    }
+
+    for (let dayOffset = 1; dayOffset <= gapDays; dayOffset += 1) {
+      const dayKey = startDay.add(dayOffset, 'day').format('YYYY-MM-DD')
+      addUsage(dayKey, importPerDay, exportPerDay, solarPerDay, netPerDay)
+    }
+  }
+
+  return [...grouped.values()].sort((a, b) => a.date.localeCompare(b.date))
+}
+
+const average = (values: number[]) =>
+  values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0
+
+const median = (values: number[]) => {
+  if (!values.length) {
+    return 0
+  }
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2
+  }
+  return sorted[mid]
+}
+
+const standardDeviation = (values: number[]) => {
+  if (values.length <= 1) {
+    return 0
+  }
+  const mean = average(values)
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1)
+  return Math.sqrt(variance)
+}
+
+const calculateLinearSlope = (values: number[]) => {
+  if (values.length <= 1) {
+    return 0
+  }
+
+  const n = values.length
+  const sumX = ((n - 1) * n) / 2
+  const sumXX = ((n - 1) * n * (2 * n - 1)) / 6
+  const sumY = values.reduce((sum, value) => sum + value, 0)
+  const sumXY = values.reduce((sum, value, index) => sum + index * value, 0)
+  const denominator = n * sumXX - sumX * sumX
+
+  if (denominator === 0) {
+    return 0
+  }
+
+  return (n * sumXY - sumX * sumY) / denominator
+}
+
+const getKeralaSeasonalMultipliers = (dateValue: string) => {
+  const month = dayjs(dateValue).month()
+
+  // Irimbiliyam / central Kerala profile: monsoon typically lowers solar and raises grid dependency.
+  if (month >= 5 && month <= 7) {
+    return { solar: 0.72, import: 1.14, export: 0.82 }
+  }
+
+  if (month >= 8 && month <= 9) {
+    return { solar: 0.82, import: 1.08, export: 0.9 }
+  }
+
+  if (month >= 1 && month <= 4) {
+    return { solar: 1.08, import: 0.95, export: 1.08 }
+  }
+
+  return { solar: 0.93, import: 1.02, export: 0.96 }
+}
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+
+const IRIMBILIYAM_COORDS = {
+  latitude: 10.88,
+  longitude: 76.13,
+}
+
+type WeatherStatus = 'idle' | 'loading' | 'ready' | 'error'
+
+type WeatherDaySignal = {
+  cloudCover: number
+  rainProbability: number
+  sunshineHours: number
+  radiation: number
+}
+
+type OpenMeteoDailyResponse = {
+  time: string[]
+  cloud_cover_mean?: number[]
+  precipitation_probability_max?: number[]
+  sunshine_duration?: number[]
+  shortwave_radiation_sum?: number[]
+}
+
+type OpenMeteoResponse = {
+  daily?: OpenMeteoDailyResponse
+}
+
+const getWeatherAdjustedMultipliers = (
+  dateValue: string,
+  signal?: WeatherDaySignal,
+) => {
+  const seasonal = getKeralaSeasonalMultipliers(dateValue)
+
+  if (!signal) {
+    return {
+      import: seasonal.import,
+      export: seasonal.export,
+      solar: seasonal.solar,
+      hasLiveWeather: false,
+    }
+  }
+
+  const sunshineFactor = clamp(signal.sunshineHours / 7.2, 0.35, 1.3)
+  const cloudFactor = clamp(1 - signal.cloudCover / 120, 0.3, 1.2)
+  const rainFactor = clamp(1 - signal.rainProbability / 160, 0.35, 1.1)
+  const radiationFactor = clamp(signal.radiation / 18, 0.35, 1.25)
+
+  const solarWeatherFactor = clamp(
+    sunshineFactor * 0.42 + cloudFactor * 0.26 + rainFactor * 0.17 + radiationFactor * 0.15,
+    0.3,
+    1.35,
+  )
+
+  const importWeatherFactor = clamp(1 + (1 - solarWeatherFactor) * 0.48, 0.82, 1.42)
+  const exportWeatherFactor = clamp(solarWeatherFactor * 0.95, 0.25, 1.35)
+
+  return {
+    import: seasonal.import * importWeatherFactor,
+    export: seasonal.export * exportWeatherFactor,
+    solar: seasonal.solar * solarWeatherFactor,
+    hasLiveWeather: true,
+  }
+}
+
+const describeForecastDeviation = (
+  importErrorPct: number,
+  exportErrorPct: number,
+  solarErrorPct: number,
+) => {
+  if (solarErrorPct < -18) {
+    return 'Actual solar was lower than expected, likely due to cloud/rain variation.'
+  }
+  if (solarErrorPct > 18) {
+    return 'Actual solar was higher than expected, likely due to clearer weather.'
+  }
+  if (importErrorPct > 15) {
+    return 'Import was higher than predicted, likely due to additional household load.'
+  }
+  if (importErrorPct < -15) {
+    return 'Import was lower than predicted, likely due to lighter household usage.'
+  }
+  if (exportErrorPct > 15) {
+    return 'Export exceeded expectation, showing stronger generation or lower self-use.'
+  }
+  if (exportErrorPct < -15) {
+    return 'Export was lower than expected, likely due to higher self-consumption.'
+  }
+  return 'Prediction matched observed pattern reasonably well.'
+}
+
 type ReadingFormState = {
   date: string
   time: string
@@ -746,6 +1060,18 @@ function App() {
   const [billGeneratedAt, setBillGeneratedAt] = useState(defaultBillGeneratedAt)
   const [billImportBusy, setBillImportBusy] = useState(false)
   const [billImportMessage, setBillImportMessage] = useState('')
+  const [weatherSignals, setWeatherSignals] = useState<Record<string, WeatherDaySignal>>({})
+  const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>('idle')
+  const [weatherMessage, setWeatherMessage] = useState('')
+  const [forecastAudits, setForecastAudits] = useState<ForecastAuditEntry[]>([])
+  const [solarUsageLogs, setSolarUsageLogs] = useState<SolarUsageEntry[]>([])
+  const [isSolarLogModalOpen, setIsSolarLogModalOpen] = useState(false)
+  const [solarLogValue, setSolarLogValue] = useState('')
+  const [solarLogNote, setSolarLogNote] = useState('')
+  const [showDailyBreakdown, setShowDailyBreakdown] = useState(false)
+  const [solarDailySummaries, setSolarDailySummaries] = useState<SolarDailySummary[]>([])
+  const [eodSolarTotalInput, setEodSolarTotalInput] = useState('')
+  const [eodSolarNoteInput, setEodSolarNoteInput] = useState('')
 
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
@@ -800,8 +1126,50 @@ function App() {
       setActivityLog(parsed.slice(0, 100))
     }
 
+    const rawForecastAudit = localStorage.getItem(FORECAST_AUDIT_KEY)
+    if (rawForecastAudit) {
+      const parsed = JSON.parse(rawForecastAudit) as ForecastAuditEntry[]
+      setForecastAudits(parsed.slice(0, 40))
+    }
+
+    const rawSolarUsage = localStorage.getItem(SOLAR_USAGE_LOG_KEY)
+    if (rawSolarUsage) {
+      const parsed = JSON.parse(rawSolarUsage) as SolarUsageEntry[]
+      setSolarUsageLogs(parsed.slice(0, 300))
+    }
+
+    const rawSolarSummary = localStorage.getItem(SOLAR_DAILY_SUMMARY_KEY)
+    if (rawSolarSummary) {
+      const parsed = JSON.parse(rawSolarSummary) as SolarDailySummary[]
+      setSolarDailySummaries(parsed.slice(0, 120))
+    }
+
     setIsHydrated(true)
   }, [])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    localStorage.setItem(FORECAST_AUDIT_KEY, JSON.stringify(forecastAudits.slice(0, 40)))
+  }, [forecastAudits, isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    localStorage.setItem(SOLAR_USAGE_LOG_KEY, JSON.stringify(solarUsageLogs.slice(0, 300)))
+  }, [solarUsageLogs, isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    localStorage.setItem(
+      SOLAR_DAILY_SUMMARY_KEY,
+      JSON.stringify(solarDailySummaries.slice(0, 120)),
+    )
+  }, [solarDailySummaries, isHydrated])
 
   useEffect(() => {
     if (!isCloudEnabled || !supabase) {
@@ -823,6 +1191,75 @@ function App() {
     return () => {
       isMounted = false
       listener.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    let isCancelled = false
+
+    const loadWeatherForecast = async () => {
+      setWeatherStatus('loading')
+
+      try {
+        const today = dayjs().format('YYYY-MM-DD')
+        const forecastEnd = dayjs().add(15, 'day').format('YYYY-MM-DD')
+        const params = new URLSearchParams({
+          latitude: String(IRIMBILIYAM_COORDS.latitude),
+          longitude: String(IRIMBILIYAM_COORDS.longitude),
+          timezone: 'Asia/Kolkata',
+          start_date: today,
+          end_date: forecastEnd,
+          daily:
+            'cloud_cover_mean,precipitation_probability_max,sunshine_duration,shortwave_radiation_sum',
+        })
+
+        const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`)
+        if (!response.ok) {
+          throw new Error(`Weather service unavailable (${response.status})`)
+        }
+
+        const payload = (await response.json()) as OpenMeteoResponse
+        const daily = payload.daily
+
+        if (!daily?.time?.length) {
+          throw new Error('Weather service returned empty daily forecast')
+        }
+
+        const nextSignals: Record<string, WeatherDaySignal> = {}
+
+        for (let index = 0; index < daily.time.length; index += 1) {
+          const dateKey = daily.time[index]
+          nextSignals[dateKey] = {
+            cloudCover: Number(daily.cloud_cover_mean?.[index] ?? 60),
+            rainProbability: Number(daily.precipitation_probability_max?.[index] ?? 40),
+            sunshineHours: Number(daily.sunshine_duration?.[index] ?? 21600) / 3600,
+            radiation: Number(daily.shortwave_radiation_sum?.[index] ?? 12),
+          }
+        }
+
+        if (!isCancelled) {
+          setWeatherSignals(nextSignals)
+          setWeatherStatus('ready')
+          setWeatherMessage(
+            `Live weather synced for ${Object.keys(nextSignals).length} days (Irimbiliyam).`,
+          )
+        }
+      } catch (error) {
+        if (!isCancelled) {
+          setWeatherStatus('error')
+          setWeatherMessage(
+            error instanceof Error
+              ? `${error.message}. Using seasonal fallback model.`
+              : 'Weather sync failed. Using seasonal fallback model.',
+          )
+        }
+      }
+    }
+
+    void loadWeatherForecast()
+
+    return () => {
+      isCancelled = true
     }
   }, [])
 
@@ -897,6 +1334,42 @@ function App() {
 
   const sortedReadings = useMemo(() => sortReadings(readings), [readings])
   const derivedReadings = useMemo(() => deriveReadings(sortedReadings), [sortedReadings])
+  const normalizedDailySeries = useMemo(
+    () => buildNormalizedDailyUsageSeries(derivedReadings),
+    [derivedReadings],
+  )
+
+  const forecastCalibration = useMemo(() => {
+    if (!forecastAudits.length) {
+      return { import: 1, export: 1, solar: 1 }
+    }
+
+    const recent = forecastAudits.slice(0, 7)
+    const ratio = (actual: number, predicted: number) =>
+      predicted > 0 ? actual / predicted : 1
+
+    const importMultiplier = clamp(
+      average(recent.map((row) => ratio(row.actualImport, row.predictedImport))),
+      0.72,
+      1.3,
+    )
+    const exportMultiplier = clamp(
+      average(recent.map((row) => ratio(row.actualExport, row.predictedExport))),
+      0.72,
+      1.3,
+    )
+    const solarMultiplier = clamp(
+      average(recent.map((row) => ratio(row.actualSolar, row.predictedSolar))),
+      0.72,
+      1.3,
+    )
+
+    return {
+      import: Number.isFinite(importMultiplier) ? importMultiplier : 1,
+      export: Number.isFinite(exportMultiplier) ? exportMultiplier : 1,
+      solar: Number.isFinite(solarMultiplier) ? solarMultiplier : 1,
+    }
+  }, [forecastAudits])
 
   const filteredReadings = useMemo(() => {
     if (!derivedReadings.length) {
@@ -1157,7 +1630,7 @@ function App() {
   }, [selectedCycle, previousCycle])
 
   const forecast = useMemo(() => {
-    if (!selectedCycle || !selectedCycleReadings.length) {
+    if (!selectedCycle || !selectedCycleReadings.length || !derivedReadings.length) {
       return null
     }
 
@@ -1168,18 +1641,398 @@ function App() {
       selectedCycleReadings[selectedCycleReadings.length - 1].date,
     )
     const elapsedDays = Math.max(1, lastReadingDate.diff(cycleStart, 'day') + 1)
-    const multiplier = Math.max(1, totalDays / elapsedDays)
+
+    const remainingDays = Math.max(0, cycleEnd.diff(lastReadingDate, 'day'))
+
+    const historyWindowStart = cycleStart.subtract(75, 'day')
+    const relevantRows = derivedReadings.filter((row) => {
+      const date = dayjs(row.date)
+      return (
+        (date.isSame(historyWindowStart) || date.isAfter(historyWindowStart)) &&
+        (date.isSame(lastReadingDate) || date.isBefore(lastReadingDate))
+      )
+    })
+
+    const dailyUsage = buildNormalizedDailyUsageSeries(relevantRows)
+    if (!dailyUsage.length) {
+      return null
+    }
+
+    const recent = dailyUsage.slice(-Math.min(21, dailyUsage.length))
+    const importSeries = recent.map((row) => Math.max(0, row.import))
+    const exportSeries = recent.map((row) => Math.max(0, row.export))
+    const solarSeries = recent.map((row) => Math.max(0, row.solar))
+
+    const baseImport =
+      (average(importSeries) * 0.6 + median(importSeries) * 0.4) * forecastCalibration.import
+    const baseExport =
+      (average(exportSeries) * 0.6 + median(exportSeries) * 0.4) * forecastCalibration.export
+    const baseSolar =
+      (average(solarSeries) * 0.6 + median(solarSeries) * 0.4) * forecastCalibration.solar
+
+    const importSlope = calculateLinearSlope(importSeries)
+    const exportSlope = calculateLinearSlope(exportSeries)
+    const solarSlope = calculateLinearSlope(solarSeries)
+
+    const weekdaySums = Array.from({ length: 7 }, () => ({
+      import: 0,
+      export: 0,
+      solar: 0,
+      count: 0,
+    }))
+
+    for (const row of recent) {
+      const weekday = dayjs(row.date).day()
+      weekdaySums[weekday].import += Math.max(0, row.import)
+      weekdaySums[weekday].export += Math.max(0, row.export)
+      weekdaySums[weekday].solar += Math.max(0, row.solar)
+      weekdaySums[weekday].count += 1
+    }
+
+    const getWeekdayFactor = (dateValue: string, metric: 'import' | 'export' | 'solar') => {
+      const weekday = dayjs(dateValue).day()
+      const bucket = weekdaySums[weekday]
+      const weekdayAverage =
+        bucket.count > 0 ? bucket[metric] / bucket.count : metric === 'import' ? baseImport : metric === 'export' ? baseExport : baseSolar
+      const baseline = metric === 'import' ? baseImport : metric === 'export' ? baseExport : baseSolar
+
+      if (baseline <= 0) {
+        return 1
+      }
+
+      return clamp(weekdayAverage / baseline, 0.7, 1.35)
+    }
+
+    let futureImport = 0
+    let futureExport = 0
+    let futureSolar = 0
+    let projectedPayable = selectedCycle.payableUnits
+    let projectedClosingBank = selectedCycle.closingBank
+    let weatherDaysUsed = 0
+
+    for (let offset = 1; offset <= remainingDays; offset += 1) {
+      const targetDate = lastReadingDate.add(offset, 'day').format('YYYY-MM-DD')
+      const multipliers = getWeatherAdjustedMultipliers(targetDate, weatherSignals[targetDate])
+      if (multipliers.hasLiveWeather) {
+        weatherDaysUsed += 1
+      }
+
+      const importPerDay = clamp(
+        (baseImport + importSlope * offset) * getWeekdayFactor(targetDate, 'import') * multipliers.import,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      )
+
+      const exportPerDay = clamp(
+        (baseExport + exportSlope * offset) * getWeekdayFactor(targetDate, 'export') * multipliers.export,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      )
+
+      const solarPerDay = clamp(
+        (baseSolar + solarSlope * offset) * getWeekdayFactor(targetDate, 'solar') * multipliers.solar,
+        0,
+        Number.MAX_SAFE_INTEGER,
+      )
+
+      const netPerDay = importPerDay - exportPerDay
+
+      if (netPerDay > 0) {
+        const bankUsed = Math.min(projectedClosingBank, netPerDay)
+        projectedClosingBank -= bankUsed
+        projectedPayable += netPerDay - bankUsed
+      } else if (netPerDay < 0) {
+        projectedClosingBank += Math.abs(netPerDay)
+      }
+
+      futureImport += importPerDay
+      futureExport += exportPerDay
+      futureSolar += solarPerDay
+    }
+
+    const importVolatility = baseImport > 0 ? standardDeviation(importSeries) / baseImport : 1
+    const sampleStrength = clamp(recent.length / 21, 0, 1)
+    const coverageStrength = clamp(elapsedDays / totalDays, 0, 1)
+    const volatilityPenalty = clamp(importVolatility, 0, 1.2)
+    const confidenceScore = clamp(
+      Math.round(42 + sampleStrength * 28 + coverageStrength * 25 - volatilityPenalty * 20),
+      35,
+      95,
+    )
 
     return {
       elapsedDays,
       totalDays,
-      projectedImport: selectedCycle.importTotal * multiplier,
-      projectedExport: selectedCycle.exportTotal * multiplier,
-      projectedNet: selectedCycle.net * multiplier,
-      projectedPayable: selectedCycle.payableUnits * multiplier,
-      projectedSolar: selectedCycleReadings.reduce((sum, row) => sum + row.solarDelta, 0) * multiplier,
+      remainingDays,
+      projectedImport: selectedCycle.importTotal + futureImport,
+      projectedExport: selectedCycle.exportTotal + futureExport,
+      projectedNet: selectedCycle.net + (futureImport - futureExport),
+      projectedPayable,
+      projectedSolar: selectedCycleReadings.reduce((sum, row) => sum + row.solarDelta, 0) + futureSolar,
+      projectedClosingBank,
+      confidenceScore,
+      weatherDaysUsed,
+      modelNote:
+        weatherDaysUsed > 0
+          ? 'Model uses daily behavior trend + weekday pattern + live Irimbiliyam weather (cloud/rain/sunlight) and seasonal correction.'
+          : 'Model uses daily behavior trend + weekday pattern with Irimbiliyam seasonal fallback (weather feed unavailable).',
     }
-  }, [selectedCycle, selectedCycleReadings])
+  }, [
+    selectedCycle,
+    selectedCycleReadings,
+    derivedReadings,
+    weatherSignals,
+    forecastCalibration,
+  ])
+
+  const todayForecast = useMemo(() => {
+    if (!derivedReadings.length) {
+      return null
+    }
+
+    const recentDaily = normalizedDailySeries.slice(-Math.min(28, normalizedDailySeries.length))
+    if (!recentDaily.length) {
+      return null
+    }
+
+    const importSeries = recentDaily.map((row) => Math.max(0, row.import))
+    const exportSeries = recentDaily.map((row) => Math.max(0, row.export))
+    const solarSeries = recentDaily.map((row) => Math.max(0, row.solar))
+
+    const baseImport =
+      (average(importSeries) * 0.6 + median(importSeries) * 0.4) * forecastCalibration.import
+    const baseExport =
+      (average(exportSeries) * 0.6 + median(exportSeries) * 0.4) * forecastCalibration.export
+    const baseSolar =
+      (average(solarSeries) * 0.6 + median(solarSeries) * 0.4) * forecastCalibration.solar
+
+    const importSlope = calculateLinearSlope(importSeries)
+    const exportSlope = calculateLinearSlope(exportSeries)
+    const solarSlope = calculateLinearSlope(solarSeries)
+
+    const weekdaySums = Array.from({ length: 7 }, () => ({
+      import: 0,
+      export: 0,
+      solar: 0,
+      count: 0,
+    }))
+
+    for (const row of recentDaily) {
+      const weekday = dayjs(row.date).day()
+      weekdaySums[weekday].import += Math.max(0, row.import)
+      weekdaySums[weekday].export += Math.max(0, row.export)
+      weekdaySums[weekday].solar += Math.max(0, row.solar)
+      weekdaySums[weekday].count += 1
+    }
+
+    const todayKey = dayjs().format('YYYY-MM-DD')
+    const todayWeekday = dayjs(todayKey).day()
+    const todayBucket = weekdaySums[todayWeekday]
+
+    const weekdayFactor = (metric: 'import' | 'export' | 'solar') => {
+      const baseline = metric === 'import' ? baseImport : metric === 'export' ? baseExport : baseSolar
+      if (baseline <= 0) {
+        return 1
+      }
+      const dayAverage = todayBucket.count > 0 ? todayBucket[metric] / todayBucket.count : baseline
+      return clamp(dayAverage / baseline, 0.7, 1.35)
+    }
+
+    const weatherSignal = weatherSignals[todayKey]
+    const multipliers = getWeatherAdjustedMultipliers(todayKey, weatherSignal)
+    const weekdayImportFactor = weekdayFactor('import')
+    const weekdayExportFactor = weekdayFactor('export')
+    const weekdaySolarFactor = weekdayFactor('solar')
+
+    const expectedImport = clamp(
+      (baseImport + importSlope) * weekdayImportFactor * multipliers.import,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )
+
+    const expectedExport = clamp(
+      (baseExport + exportSlope) * weekdayExportFactor * multipliers.export,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )
+
+    const expectedSolar = clamp(
+      (baseSolar + solarSlope) * weekdaySolarFactor * multipliers.solar,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )
+
+    const loggedSolarToday =
+      solarUsageLogs.find((entry) => dayjs(entry.timestamp).format('YYYY-MM-DD') === todayKey)
+        ?.value ?? 0
+
+    const now = dayjs()
+    const daylightProgress = clamp((now.hour() + now.minute() / 60 - 6) / 12, 0, 1)
+    const expectedSoFar = expectedSolar * daylightProgress
+    const remainingShare = clamp(1 - daylightProgress, 0, 1)
+
+    let adjustedExpectedSolar = expectedSolar
+    if (loggedSolarToday > expectedSoFar) {
+      adjustedExpectedSolar = loggedSolarToday + expectedSolar * remainingShare * 0.9
+    }
+    adjustedExpectedSolar = Math.max(adjustedExpectedSolar, loggedSolarToday)
+
+    const solarAdjustmentRatio = clamp(adjustedExpectedSolar / Math.max(expectedSolar, 0.1), 0.72, 1.38)
+    const adjustedExpectedImport = expectedImport / solarAdjustmentRatio
+    const adjustedExpectedExport = expectedExport * solarAdjustmentRatio
+    const expectedNet = adjustedExpectedImport - adjustedExpectedExport
+    const volatility = baseImport > 0 ? standardDeviation(importSeries) / baseImport : 1
+    const confidenceScore = clamp(
+      Math.round(45 + clamp(recentDaily.length / 28, 0, 1) * 30 - clamp(volatility, 0, 1.2) * 16),
+      38,
+      94,
+    )
+
+    return {
+      date: todayKey,
+      expectedImport: adjustedExpectedImport,
+      expectedExport: adjustedExpectedExport,
+      expectedSolar: adjustedExpectedSolar,
+      expectedNet,
+      confidenceScore,
+      weatherSignal,
+      weatherDriven: multipliers.hasLiveWeather,
+      loggedSolarToday,
+      breakdown: {
+        baseImport,
+        baseExport,
+        baseSolar,
+        importSlope,
+        exportSlope,
+        solarSlope,
+        weekdayImportFactor,
+        weekdayExportFactor,
+        weekdaySolarFactor,
+        weatherImportFactor: multipliers.import,
+        weatherExportFactor: multipliers.export,
+        weatherSolarFactor: multipliers.solar,
+        calibrationImportFactor: forecastCalibration.import,
+        calibrationExportFactor: forecastCalibration.export,
+        calibrationSolarFactor: forecastCalibration.solar,
+      },
+    }
+  }, [normalizedDailySeries, weatherSignals, forecastCalibration, solarUsageLogs])
+
+  const manualSolarToday = useMemo(() => {
+    const todayKey = dayjs().format('YYYY-MM-DD')
+    return (
+      solarUsageLogs.find((entry) => dayjs(entry.timestamp).format('YYYY-MM-DD') === todayKey)
+        ?.value ?? 0
+    )
+  }, [solarUsageLogs])
+
+  const latestSolarLog = useMemo(() => solarUsageLogs[0], [solarUsageLogs])
+  const todayDateKey = dayjs().format('YYYY-MM-DD')
+  const todaySolarLogs = useMemo(
+    () =>
+      solarUsageLogs
+        .filter((entry) => dayjs(entry.timestamp).format('YYYY-MM-DD') === todayDateKey)
+        .slice(0, 8),
+    [solarUsageLogs, todayDateKey],
+  )
+
+  const todaySolarSummary = useMemo(
+    () => solarDailySummaries.find((entry) => entry.date === todayDateKey),
+    [solarDailySummaries, todayDateKey],
+  )
+
+  const meterDerivedSolarToday = useMemo(() => {
+    const row = normalizedDailySeries.find((entry) => entry.date === todayDateKey)
+    return row ? Math.max(0, row.solar) : 0
+  }, [normalizedDailySeries, todayDateKey])
+
+  const effectiveEodSolar = useMemo(() => {
+    if (todaySolarSummary) {
+      return {
+        total: todaySolarSummary.total,
+        source: 'manual-eod' as const,
+      }
+    }
+    if (meterDerivedSolarToday > 0) {
+      return {
+        total: meterDerivedSolarToday,
+        source: 'meter-derived' as const,
+      }
+    }
+    return {
+      total: manualSolarToday,
+      source: 'manual-intraday' as const,
+    }
+  }, [todaySolarSummary, meterDerivedSolarToday, manualSolarToday])
+
+  useEffect(() => {
+    if (!todaySolarSummary) {
+      if (eodSolarTotalInput.trim() === '' && meterDerivedSolarToday > 0) {
+        setEodSolarTotalInput(meterDerivedSolarToday.toFixed(3))
+      }
+      return
+    }
+    setEodSolarTotalInput(todaySolarSummary.total.toString())
+    setEodSolarNoteInput(todaySolarSummary.note ?? '')
+  }, [todaySolarSummary, meterDerivedSolarToday, eodSolarTotalInput])
+
+  const saveSolarUsageLog = () => {
+    const value = Number(solarLogValue)
+    if (!Number.isFinite(value) || value <= 0) {
+      setAppToast('Enter a valid solar value in kWh.')
+      return
+    }
+
+    const entry: SolarUsageEntry = {
+      id: createReadingId(),
+      timestamp: new Date().toISOString(),
+      value,
+      note: solarLogNote.trim() || undefined,
+    }
+
+    const nextSolarLogs = [entry, ...solarUsageLogs].slice(0, 300)
+    setSolarUsageLogs(nextSolarLogs)
+    setSolarLogValue('')
+    setSolarLogNote('')
+    setIsSolarLogModalOpen(false)
+    markLocalChange()
+    setAppToast('Solar usage logged.')
+    logActivity('add-solar-log', `${value.toFixed(2)} kWh`)
+
+    if (supabase && cloudUser) {
+      void pushToCloud(sortedReadings, true, nextSolarLogs, solarDailySummaries)
+    }
+  }
+
+  const saveEndOfDaySolarTotal = () => {
+    const total = Number(eodSolarTotalInput)
+    if (!Number.isFinite(total) || total < 0) {
+      setAppToast('Enter a valid end-of-day solar total in kWh.')
+      return
+    }
+
+    const entry: SolarDailySummary = {
+      date: todayDateKey,
+      total,
+      note: eodSolarNoteInput.trim() || undefined,
+      updatedAt: new Date().toISOString(),
+    }
+
+    const nextSummaries = (() => {
+      const filtered = solarDailySummaries.filter((item) => item.date !== todayDateKey)
+      return [entry, ...filtered].slice(0, 120)
+    })()
+
+    setSolarDailySummaries(nextSummaries)
+
+    markLocalChange()
+    setAppToast('End-of-day solar total saved.')
+    logActivity('save-solar-eod', `${todayDateKey} - ${total.toFixed(2)} kWh`)
+
+    if (supabase && cloudUser) {
+      void pushToCloud(sortedReadings, true, solarUsageLogs, nextSummaries)
+    }
+  }
 
   const anomalies = useMemo(() => {
     const alerts: Array<{ id: string; message: string; level: 'warn' | 'danger' }> = []
@@ -1337,7 +2190,7 @@ function App() {
     }
 
     setIsReadingModalOpen(true)
-    setAppToast('Bill parsed. Verify values and tap Save Reading.')
+    setAppToast('Bill parsed. Verify values and tap Save Meter Reading.')
   }
 
   const importKsebBillFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1783,7 +2636,12 @@ function App() {
     setUpdateMessage('Checked for updates. Refresh the app to apply latest build.')
   }
 
-  const pushToCloud = async (readingsToSync = sortedReadings, silent = false) => {
+  const pushToCloud = async (
+    readingsToSync = sortedReadings,
+    silent = false,
+    solarLogsToSync = solarUsageLogs,
+    solarSummariesToSync = solarDailySummaries,
+  ) => {
     if (!supabase || !cloudUser) {
       if (!silent) {
         setCloudMessage('Sign in to cloud first.')
@@ -1794,7 +2652,7 @@ function App() {
     setSyncStatus('syncing')
     setCloudBusy(true)
     if (!silent) {
-      setCloudMessage('Syncing local readings to cloud...')
+      setCloudMessage('Syncing local readings and solar tracker to cloud...')
     }
 
     const payload = readingsToSync.map((reading) => ({
@@ -1816,20 +2674,47 @@ function App() {
       updated_at: new Date().toISOString(),
     }))
 
-    const { error } = await supabase
-      .from('meter_readings')
-      .upsert(payload, { onConflict: 'id' })
+    const solarLogPayload = solarLogsToSync.map((entry) => ({
+      id: entry.id,
+      user_id: cloudUser.id,
+      logged_at: entry.timestamp,
+      value_kwh: entry.value,
+      note: entry.note ?? null,
+      updated_at: new Date().toISOString(),
+    }))
+
+    const solarSummaryPayload = solarSummariesToSync.map((entry) => ({
+      user_id: cloudUser.id,
+      summary_date: entry.date,
+      total_kwh: entry.total,
+      note: entry.note ?? null,
+      updated_at: entry.updatedAt,
+    }))
+
+    const [meterResult, solarLogResult, solarSummaryResult] = await Promise.all([
+      supabase.from('meter_readings').upsert(payload, { onConflict: 'id' }),
+      solarLogPayload.length
+        ? supabase.from('solar_usage_logs').upsert(solarLogPayload, { onConflict: 'id' })
+        : Promise.resolve({ error: null }),
+      solarSummaryPayload.length
+        ? supabase
+            .from('solar_daily_summaries')
+            .upsert(solarSummaryPayload, { onConflict: 'user_id,summary_date' })
+        : Promise.resolve({ error: null }),
+    ])
+
+    const error = meterResult.error ?? solarLogResult.error ?? solarSummaryResult.error
 
     if (error) {
       setCloudMessage(`Cloud push failed: ${error.message}`)
       setSyncStatus('error')
     } else if (!silent) {
-      setCloudMessage('Cloud sync complete: local data uploaded.')
+      setCloudMessage('Cloud sync complete: readings and solar tracker uploaded.')
       setSyncStatus('success')
       setLastSyncAt(new Date().toISOString())
       setPendingSyncChanges(0)
     } else {
-      setCloudMessage('Reading saved locally and synced to cloud automatically.')
+      setCloudMessage('Data saved locally and synced to cloud automatically.')
       setSyncStatus('success')
       setLastSyncAt(new Date().toISOString())
       setPendingSyncChanges(0)
@@ -1851,14 +2736,28 @@ function App() {
       setCloudMessage('Downloading readings from cloud...')
     }
 
-    const { data, error } = await supabase
-      .from('meter_readings')
-      .select(
-        'id, reading_date, reading_time, import_t, import_t1, import_t2, import_t3, export_t, export_t1, export_t2, export_t3, net, solar_generated, note',
-      )
-      .eq('user_id', cloudUser.id)
-      .order('reading_date', { ascending: true })
-      .order('reading_time', { ascending: true })
+    const [meterResult, solarLogResult, solarSummaryResult] = await Promise.all([
+      supabase
+        .from('meter_readings')
+        .select(
+          'id, reading_date, reading_time, import_t, import_t1, import_t2, import_t3, export_t, export_t1, export_t2, export_t3, net, solar_generated, note',
+        )
+        .eq('user_id', cloudUser.id)
+        .order('reading_date', { ascending: true })
+        .order('reading_time', { ascending: true }),
+      supabase
+        .from('solar_usage_logs')
+        .select('id, user_id, logged_at, value_kwh, note, updated_at')
+        .eq('user_id', cloudUser.id)
+        .order('logged_at', { ascending: false }),
+      supabase
+        .from('solar_daily_summaries')
+        .select('user_id, summary_date, total_kwh, note, updated_at')
+        .eq('user_id', cloudUser.id)
+        .order('summary_date', { ascending: false }),
+    ])
+
+    const error = meterResult.error ?? solarLogResult.error ?? solarSummaryResult.error
 
     if (error) {
       setCloudMessage(`Cloud pull failed: ${error.message}`)
@@ -1867,7 +2766,7 @@ function App() {
       return
     }
 
-    const cloudReadings: Reading[] = (data as CloudReadingRow[]).map((row) => ({
+    const cloudReadings: Reading[] = ((meterResult.data ?? []) as CloudReadingRow[]).map((row) => ({
       id: row.id,
       date: row.reading_date,
       time: row.reading_time ?? '07:00',
@@ -1884,12 +2783,34 @@ function App() {
       note: row.note ?? undefined,
     }))
 
-    if (cloudReadings.length > 0) {
-      setReadings(sortReadings(cloudReadings))
+    const cloudSolarLogs: SolarUsageEntry[] = ((solarLogResult.data ?? []) as CloudSolarUsageRow[]).map(
+      (row) => ({
+        id: row.id,
+        timestamp: row.logged_at,
+        value: Number(row.value_kwh),
+        note: row.note ?? undefined,
+      }),
+    )
+
+    const cloudSolarSummaries: SolarDailySummary[] = (
+      (solarSummaryResult.data ?? []) as CloudSolarDailySummaryRow[]
+    ).map((row) => ({
+      date: row.summary_date,
+      total: Number(row.total_kwh),
+      note: row.note ?? undefined,
+      updatedAt: row.updated_at,
+    }))
+
+    if (cloudReadings.length > 0 || cloudSolarLogs.length > 0 || cloudSolarSummaries.length > 0) {
+      if (cloudReadings.length > 0) {
+        setReadings(sortReadings(cloudReadings))
+      }
+      setSolarUsageLogs(cloudSolarLogs)
+      setSolarDailySummaries(cloudSolarSummaries)
       setCloudMessage(
         silent
-          ? `Auto-synced ${cloudReadings.length} readings from cloud.`
-          : `Cloud download complete: ${cloudReadings.length} readings loaded.`,
+          ? `Auto-synced cloud data: ${cloudReadings.length} readings, ${cloudSolarLogs.length} solar logs.`
+          : `Cloud download complete: ${cloudReadings.length} readings, ${cloudSolarLogs.length} solar logs, ${cloudSolarSummaries.length} EOD summaries.`,
       )
       setSyncStatus('success')
       setLastSyncAt(new Date().toISOString())
@@ -2007,6 +2928,71 @@ function App() {
     void pullFromCloud(true)
   }, [cloudUser?.id, isHydrated])
 
+  useEffect(() => {
+    if (!isHydrated || !todayForecast) {
+      return
+    }
+
+    const snapshotRaw = localStorage.getItem(DAILY_FORECAST_SNAPSHOT_KEY)
+    const snapshots = snapshotRaw
+      ? (JSON.parse(snapshotRaw) as Record<string, DailyForecastSnapshot>)
+      : {}
+
+    snapshots[todayForecast.date] = {
+      date: todayForecast.date,
+      predictedImport: todayForecast.expectedImport,
+      predictedExport: todayForecast.expectedExport,
+      predictedSolar: todayForecast.expectedSolar,
+      predictedNet: todayForecast.expectedNet,
+      createdAt: new Date().toISOString(),
+    }
+
+    localStorage.setItem(DAILY_FORECAST_SNAPSHOT_KEY, JSON.stringify(snapshots))
+
+    const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
+    const actualYesterday = normalizedDailySeries.find((row) => row.date === yesterday)
+    const snapshotYesterday = snapshots[yesterday]
+
+    if (!actualYesterday || !snapshotYesterday) {
+      return
+    }
+
+    const alreadyAudited = forecastAudits.some((entry) => entry.date === yesterday)
+    if (alreadyAudited) {
+      return
+    }
+
+    const errorPct = (predicted: number, actual: number) =>
+      predicted > 0 ? ((actual - predicted) / predicted) * 100 : 0
+
+    const importErrorPct = errorPct(snapshotYesterday.predictedImport, actualYesterday.import)
+    const exportErrorPct = errorPct(snapshotYesterday.predictedExport, actualYesterday.export)
+    const solarErrorPct = errorPct(snapshotYesterday.predictedSolar, actualYesterday.solar)
+    const netErrorPct = errorPct(snapshotYesterday.predictedNet, actualYesterday.net)
+
+    const note = describeForecastDeviation(importErrorPct, exportErrorPct, solarErrorPct)
+
+    const audit: ForecastAuditEntry = {
+      date: yesterday,
+      predictedImport: snapshotYesterday.predictedImport,
+      actualImport: actualYesterday.import,
+      predictedExport: snapshotYesterday.predictedExport,
+      actualExport: actualYesterday.export,
+      predictedSolar: snapshotYesterday.predictedSolar,
+      actualSolar: actualYesterday.solar,
+      predictedNet: snapshotYesterday.predictedNet,
+      actualNet: actualYesterday.net,
+      importErrorPct,
+      exportErrorPct,
+      solarErrorPct,
+      netErrorPct,
+      note,
+      checkedAt: new Date().toISOString(),
+    }
+
+    setForecastAudits((prev) => [audit, ...prev].slice(0, 40))
+  }, [todayForecast, normalizedDailySeries, forecastAudits, isHydrated])
+
   return (
     <main className="app-shell">
       <header className="hero">
@@ -2097,7 +3083,14 @@ function App() {
 
         <div className="quick-add-bar">
           <button type="button" className="quick-add-button" onClick={openAddReadingModal}>
-            + Add Reading
+            + Log Meter
+          </button>
+          <button
+            type="button"
+            className="quick-add-button quick-add-button-secondary"
+            onClick={() => setIsSolarLogModalOpen(true)}
+          >
+            + Log Solar
           </button>
         </div>
       </div>
@@ -2211,7 +3204,7 @@ function App() {
           {billImportBusy
             ? 'Processing bill...'
             : billImportMessage ||
-              'Upload a KSEB bill and the app will detect date/import/export values, then pre-fill Add Reading for review.'}
+              'Upload a KSEB bill and the app will detect date/import/export values, then pre-fill meter reading form for review.'}
         </p>
       </section>
 
@@ -2451,16 +3444,114 @@ function App() {
         </div>
       </section>
 
-      <section className="card form-card">
+      <section className="card">
         <div className="section-head">
-          <h2>Reading Entry</h2>
-          <button type="button" onClick={openAddReadingModal}>
-            Add Reading
+          <h2>Solar Production Tracker</h2>
+          <button type="button" className="ghost" onClick={() => setIsSolarLogModalOpen(true)}>
+            Log Solar Usage
+          </button>
+        </div>
+        <div className="tracker-metrics">
+          <div>
+            <span>Latest Manual Solar Reading</span>
+            <strong>{formatUnits(manualSolarToday)}</strong>
+          </div>
+          <div>
+            <span>Meter-Derived Solar Today</span>
+            <strong>{formatUnits(meterDerivedSolarToday)}</strong>
+          </div>
+          <div>
+            <span>Expected Solar Today</span>
+            <strong>{formatUnits(todayForecast?.expectedSolar ?? 0)}</strong>
+          </div>
+          <div>
+            <span>Effective EOD Solar</span>
+            <strong>{formatUnits(effectiveEodSolar.total)}</strong>
+          </div>
+        </div>
+        <p className="field-hint">
+          Source:{' '}
+          {effectiveEodSolar.source === 'manual-eod'
+            ? 'Manual end-of-day entry'
+            : effectiveEodSolar.source === 'meter-derived'
+              ? 'Auto-derived from meter readings'
+                : 'Latest manual solar reading'}
+        </p>
+
+        <div className="goals-grid">
+          <label>
+            End-of-Day Solar Total (kWh)
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              value={eodSolarTotalInput}
+              onChange={(event) => setEodSolarTotalInput(event.target.value)}
+              placeholder="e.g. 5.8"
+            />
+          </label>
+          <label>
+            EOD Note (optional)
+            <input
+              type="text"
+              value={eodSolarNoteInput}
+              onChange={(event) => setEodSolarNoteInput(event.target.value)}
+              placeholder="Clear day / rain / partial cloud"
+            />
+          </label>
+        </div>
+
+        <div className="inline-actions">
+          <button type="button" onClick={saveEndOfDaySolarTotal}>
+            Save EOD Solar Total
           </button>
         </div>
         <p className="field-hint">
-          Tap Add Reading to open a quick entry popup. You will get alerts if any values
-          are missing or incorrect.
+          If you skip manual EOD entry, the app auto-calculates EOD solar from meter readings
+          (including night/next-day readings where applicable).
+        </p>
+        <p className="field-hint">
+          Each solar log is treated as your latest cumulative solar reading at that moment,
+          not an incremental addition.
+        </p>
+
+        {todaySolarLogs.length > 0 && (
+          <div className="table-wrap solar-log-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Solar Reading</th>
+                  <th>Note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {todaySolarLogs.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{dayjs(entry.timestamp).format('HH:mm')}</td>
+                    <td>{entry.value.toFixed(2)} kWh</td>
+                    <td>{entry.note ?? '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="card form-card">
+        <div className="section-head">
+          <h2>Quick Entry</h2>
+          <button type="button" onClick={openAddReadingModal}>
+            Log Meter Reading
+          </button>
+          <button type="button" className="ghost" onClick={() => setIsSolarLogModalOpen(true)}>
+            Log Solar Usage
+          </button>
+        </div>
+        <p className="field-hint">
+          Use Meter Reading for cumulative meter snapshots, and Solar Usage for multiple
+          intraday generation logs.
         </p>
       </section>
 
@@ -2468,10 +3559,10 @@ function App() {
       )}
 
       {isReadingModalOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Add reading">
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Meter reading">
           <section className="modal-sheet">
             <div className="section-head">
-              <h2>{editingReadingId ? 'Edit Reading' : 'Add Daily Reading'}</h2>
+              <h2>{editingReadingId ? 'Edit Meter Reading' : 'Add Meter Reading'}</h2>
               <button type="button" className="ghost" onClick={cancelEditing}>
                 Close
               </button>
@@ -2655,8 +3746,49 @@ function App() {
                   readings.
                 </p>
               )}
-              <button type="submit">{editingReadingId ? 'Save Reading' : 'Add Reading'}</button>
+              <button type="submit">{editingReadingId ? 'Save Meter Reading' : 'Save Meter Reading'}</button>
             </form>
+          </section>
+        </div>
+      )}
+
+      {isSolarLogModalOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Solar usage log">
+          <section className="modal-sheet solar-log-sheet">
+            <div className="section-head">
+              <h2>Log Solar Usage</h2>
+              <button type="button" className="ghost" onClick={() => setIsSolarLogModalOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="reading-form solar-log-form">
+              <label>
+                Current Solar Reading Till Now (kWh)
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={solarLogValue}
+                  onChange={(event) => setSolarLogValue(event.target.value)}
+                  placeholder="e.g. 0.85"
+                />
+              </label>
+              <label className="note-field">
+                Note (optional)
+                <textarea
+                  value={solarLogNote}
+                  onChange={(event) => setSolarLogNote(event.target.value)}
+                  placeholder="Noon peak / cloudy interval / etc"
+                />
+              </label>
+            </div>
+
+            <div className="inline-actions">
+              <button type="button" onClick={saveSolarUsageLog}>
+                Save Solar Log
+              </button>
+            </div>
           </section>
         </div>
       )}
@@ -2712,31 +3844,179 @@ function App() {
         </article>
 
         <article>
-          <h2>Forecasting</h2>
+          <h2>Daily Forecast</h2>
+          {todayForecast ? (
+            <>
+              <p className="field-hint">
+                {dayjs(todayForecast.date).format('DD MMM YYYY')}
+                {todayForecast.weatherDriven ? ' - weather-driven' : ' - seasonal fallback'}
+              </p>
+              <div className="tracker-metrics">
+                <div>
+                  <span>Expected Solar</span>
+                  <strong>{formatUnits(todayForecast.expectedSolar)}</strong>
+                </div>
+                <div>
+                  <span>Expected Import</span>
+                  <strong>{formatUnits(todayForecast.expectedImport)}</strong>
+                </div>
+                <div>
+                  <span>Expected Export</span>
+                  <strong>{formatUnits(todayForecast.expectedExport)}</strong>
+                </div>
+                <div>
+                  <span>Expected Net</span>
+                  <strong>{formatUnits(todayForecast.expectedNet)}</strong>
+                </div>
+                <div>
+                  <span>Daily Confidence</span>
+                  <strong>{todayForecast.confidenceScore}%</strong>
+                </div>
+                <div>
+                    <span>Latest Manual Solar Reading</span>
+                  <strong>{formatUnits(manualSolarToday)}</strong>
+                </div>
+                <div>
+                  <span>Forecast vs Current Reading Gap</span>
+                  <strong>{formatUnits(todayForecast.expectedSolar - manualSolarToday)}</strong>
+                </div>
+              </div>
+              {todayForecast.weatherSignal && (
+                <p className="field-hint">
+                  Weather inputs: Cloud {todayForecast.weatherSignal.cloudCover.toFixed(0)}% |
+                  Rain chance {todayForecast.weatherSignal.rainProbability.toFixed(0)}% |
+                  Sunshine {todayForecast.weatherSignal.sunshineHours.toFixed(1)}h
+                </p>
+              )}
+              <p className="field-hint">
+                Real-time adjustment uses today's latest manual solar reading: {todayForecast.loggedSolarToday.toFixed(2)} kWh
+              </p>
+              <button
+                type="button"
+                className="ghost breakdown-toggle"
+                onClick={() => setShowDailyBreakdown((prev) => !prev)}
+              >
+                {showDailyBreakdown ? 'Hide Calculation Breakdown' : 'Show Calculation Breakdown'}
+              </button>
+              {showDailyBreakdown && (
+                <div className="breakdown-panel">
+                  <p>
+                    Base solar: {todayForecast.breakdown.baseSolar.toFixed(2)} | Trend:
+                    {' '}{todayForecast.breakdown.solarSlope.toFixed(3)}
+                  </p>
+                  <p>
+                    Weekday factor: {todayForecast.breakdown.weekdaySolarFactor.toFixed(2)} |
+                    Weather factor: {todayForecast.breakdown.weatherSolarFactor.toFixed(2)}
+                  </p>
+                  <p>
+                    Calibration factor: {todayForecast.breakdown.calibrationSolarFactor.toFixed(2)}
+                    {' '}| Final expected solar: {todayForecast.expectedSolar.toFixed(3)} kWh
+                  </p>
+                </div>
+              )}
+              {latestSolarLog && (
+                <p className="field-hint">
+                  Last solar log: {dayjs(latestSolarLog.timestamp).format('DD MMM HH:mm')} |
+                  {' '}{latestSolarLog.value.toFixed(2)} kWh
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="empty-state">No daily forecast available yet.</p>
+          )}
+        </article>
+      </section>
+
+      <section className="card insights-grid">
+        <article>
+          <h2>Monthly Forecast</h2>
           {forecast ? (
-            <div className="tracker-metrics">
-              <div>
-                <span>Cycle Progress</span>
-                <strong>
-                  {forecast.elapsedDays}/{forecast.totalDays} days
-                </strong>
+            <>
+              <div className="tracker-metrics">
+                <div>
+                  <span>Cycle Progress</span>
+                  <strong>
+                    {forecast.elapsedDays}/{forecast.totalDays} days
+                  </strong>
+                </div>
+                <div>
+                  <span>Remaining Days</span>
+                  <strong>{forecast.remainingDays}</strong>
+                </div>
+                <div>
+                  <span>Forecast Confidence</span>
+                  <strong>{forecast.confidenceScore}%</strong>
+                </div>
+                <div>
+                  <span>Projected Import</span>
+                  <strong>{formatUnits(forecast.projectedImport)}</strong>
+                </div>
+                <div>
+                  <span>Projected Payable</span>
+                  <strong>{formatUnits(forecast.projectedPayable)}</strong>
+                </div>
+                <div>
+                  <span>Projected Solar</span>
+                  <strong>{formatUnits(forecast.projectedSolar)}</strong>
+                </div>
+                <div>
+                  <span>Projected Bank Close</span>
+                  <strong>{formatUnits(forecast.projectedClosingBank)}</strong>
+                </div>
+                <div>
+                  <span>Live Weather Days Used</span>
+                  <strong>{forecast.weatherDaysUsed}</strong>
+                </div>
               </div>
-              <div>
-                <span>Projected Import</span>
-                <strong>{formatUnits(forecast.projectedImport)}</strong>
-              </div>
-              <div>
-                <span>Projected Payable</span>
-                <strong>{formatUnits(forecast.projectedPayable)}</strong>
-              </div>
-              <div>
-                <span>Projected Solar</span>
-                <strong>{formatUnits(forecast.projectedSolar)}</strong>
-              </div>
-            </div>
+              <p className="field-hint">{forecast.modelNote}</p>
+              <p className="field-hint">
+                Weather Sync: {weatherStatus.toUpperCase()}
+                {weatherMessage ? ` - ${weatherMessage}` : ''}
+              </p>
+            </>
           ) : (
             <p className="empty-state">No forecast yet for this cycle.</p>
           )}
+        </article>
+
+        <article>
+          <h2>Forecast Accuracy Check</h2>
+          {forecastAudits[0] ? (
+            <>
+              <p className="field-hint">
+                Last verified day: {dayjs(forecastAudits[0].date).format('DD MMM YYYY')}
+              </p>
+              <div className="tracker-metrics">
+                <div>
+                  <span>Import Error</span>
+                  <strong>{formatSigned(forecastAudits[0].importErrorPct)}%</strong>
+                </div>
+                <div>
+                  <span>Export Error</span>
+                  <strong>{formatSigned(forecastAudits[0].exportErrorPct)}%</strong>
+                </div>
+                <div>
+                  <span>Solar Error</span>
+                  <strong>{formatSigned(forecastAudits[0].solarErrorPct)}%</strong>
+                </div>
+                <div>
+                  <span>Net Error</span>
+                  <strong>{formatSigned(forecastAudits[0].netErrorPct)}%</strong>
+                </div>
+              </div>
+              <p className="field-hint">{forecastAudits[0].note}</p>
+            </>
+          ) : (
+            <p className="empty-state">
+              Daily auto-check starts once tomorrow readings are available. We compare
+              yesterday predicted vs actual and self-correct next forecasts.
+            </p>
+          )}
+          <p className="field-hint">
+            Active calibration: Import {(forecastCalibration.import * 100).toFixed(0)}% |
+            Export {(forecastCalibration.export * 100).toFixed(0)}% |
+            Solar {(forecastCalibration.solar * 100).toFixed(0)}%
+          </p>
         </article>
       </section>
 
@@ -3099,7 +4379,14 @@ function App() {
       )}
 
       <button type="button" className="fab-add-reading" onClick={openAddReadingModal}>
-        + Add Reading
+        + Meter
+      </button>
+      <button
+        type="button"
+        className="fab-solar-log"
+        onClick={() => setIsSolarLogModalOpen(true)}
+      >
+        + Solar
       </button>
 
       <nav className="app-bottom-nav" aria-label="Mobile app sections">

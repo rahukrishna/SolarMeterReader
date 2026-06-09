@@ -50,6 +50,7 @@
 .quick-add-bar {
   display: flex;
   justify-content: flex-end;
+  gap: 0.45rem;
   padding: 0;
 }
 
@@ -66,6 +67,11 @@
 
 .quick-add-button:hover {
   transform: translateY(-1px);
+}
+
+.quick-add-button-secondary {
+  background: linear-gradient(135deg, #1a8f69, #0f7b56);
+  box-shadow: 0 10px 18px -14px rgba(15, 123, 86, 0.92);
 }
 
 .app-bottom-nav {
@@ -635,6 +641,36 @@ button.danger {
   display: none;
 }
 
+.fab-solar-log {
+  display: none;
+}
+
+.breakdown-toggle {
+  margin-top: 0.35rem;
+}
+
+.breakdown-panel {
+  margin-top: 0.45rem;
+  border: 1px solid #d4e0e7;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  background: #f8fbfd;
+}
+
+.breakdown-panel p {
+  margin: 0.22rem 0;
+  color: #36576b;
+  font-size: 0.84rem;
+}
+
+.solar-log-sheet {
+  max-width: 560px;
+}
+
+.solar-log-form {
+  grid-template-columns: 1fr;
+}
+
 .section-head {
   display: flex;
   gap: 1rem;
@@ -841,13 +877,15 @@ th {
   display: grid;
   grid-template-columns: 1fr;
   gap: 0.45rem;
+  max-width: 680px;
+  width: 100%;
 }
 
 .tracker-metrics div {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) max-content;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 0.6rem;
+  column-gap: 0.9rem;
   border-bottom: 1px dashed #d7e2e8;
   padding-bottom: 0.3rem;
 }
@@ -1161,6 +1199,23 @@ th {
     color: #f6fafc;
     border: 1px solid #3f8cb0;
     box-shadow: 0 16px 30px rgba(10, 31, 42, 0.3);
+    font-weight: 700;
+  }
+
+  .fab-solar-log {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    right: 12px;
+    bottom: calc(122px + env(safe-area-inset-bottom));
+    z-index: 70;
+    border-radius: 999px;
+    padding: 0.62rem 0.9rem;
+    background: linear-gradient(140deg, #1b8f68, #157654);
+    color: #f6fafc;
+    border: 1px solid #53a88a;
+    box-shadow: 0 16px 30px rgba(10, 31, 42, 0.26);
     font-weight: 700;
   }
 
