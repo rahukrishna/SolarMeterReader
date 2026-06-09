@@ -11,10 +11,17 @@
   padding-bottom: 2rem;
 }
 
-.app-tabs {
+.top-nav-stack {
   position: sticky;
   top: 0.4rem;
   z-index: 25;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.app-tabs {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.45rem;
@@ -41,12 +48,9 @@
 }
 
 .quick-add-bar {
-  position: sticky;
-  top: 4.1rem;
-  z-index: 24;
   display: flex;
   justify-content: flex-end;
-  padding: 0 0.2rem;
+  padding: 0;
 }
 
 .quick-add-button {
@@ -1007,9 +1011,14 @@ th {
     display: none;
   }
 
-  .quick-add-bar {
+  .top-nav-stack {
     top: 0.2rem;
-    justify-content: center;
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  .quick-add-bar {
+    display: none;
   }
 
   .hero {

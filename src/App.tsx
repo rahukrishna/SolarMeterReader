@@ -2056,48 +2056,50 @@ function App() {
         </div>
       </header>
 
-      <nav className="app-tabs" aria-label="App sections">
-        <button
-          type="button"
-          className={activeTab === 'home' ? 'tab-button active' : 'tab-button'}
-          onClick={() => setActiveTab('home')}
-        >
-          Home
-        </button>
-        <button
-          type="button"
-          className={activeTab === 'analytics' ? 'tab-button active' : 'tab-button'}
-          onClick={() => setActiveTab('analytics')}
-        >
-          Insights
-        </button>
-        <button
-          type="button"
-          className={activeTab === 'history' ? 'tab-button active' : 'tab-button'}
-          onClick={() => setActiveTab('history')}
-        >
-          History
-        </button>
-        <button
-          type="button"
-          className={activeTab === 'cloud' ? 'tab-button active' : 'tab-button'}
-          onClick={() => setActiveTab('cloud')}
-        >
-          Cloud
-        </button>
-        <button
-          type="button"
-          className={activeTab === 'manage' ? 'tab-button active' : 'tab-button'}
-          onClick={() => setActiveTab('manage')}
-        >
-          Manage
-        </button>
-      </nav>
+      <div className="top-nav-stack">
+        <nav className="app-tabs" aria-label="App sections">
+          <button
+            type="button"
+            className={activeTab === 'home' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('home')}
+          >
+            Home
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'analytics' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('analytics')}
+          >
+            Insights
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'history' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('history')}
+          >
+            History
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'cloud' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('cloud')}
+          >
+            Cloud
+          </button>
+          <button
+            type="button"
+            className={activeTab === 'manage' ? 'tab-button active' : 'tab-button'}
+            onClick={() => setActiveTab('manage')}
+          >
+            Manage
+          </button>
+        </nav>
 
-      <div className="quick-add-bar">
-        <button type="button" className="quick-add-button" onClick={openAddReadingModal}>
-          + Add Reading
-        </button>
+        <div className="quick-add-bar">
+          <button type="button" className="quick-add-button" onClick={openAddReadingModal}>
+            + Add Reading
+          </button>
+        </div>
       </div>
 
       {activeTab === 'home' && (
