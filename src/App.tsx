@@ -13,6 +13,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import './App.css'
 import { isCloudEnabled, supabase } from './lib/supabase'
 
@@ -984,7 +985,7 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
 
 const extractTextFromPdf = async (file: File) => {
   const pdfjs = await import('pdfjs-dist')
-  pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
 
   const data = new Uint8Array(await file.arrayBuffer())
   const pdf = await pdfjs.getDocument({ data }).promise
