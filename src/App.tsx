@@ -916,7 +916,8 @@ const extractDateByLabels = (text: string, labels: string[]) => {
 
 const extractNumberByLabels = (text: string, labels: string[]) => {
   for (const label of labels) {
-    const expression = new RegExp(`${label}[^\\n\\d-]{0,30}(-?\\d[\\d,]*(?:\\.\\d+)?)`, 'i')
+    // Allow line breaks and separators between label and value; many bills split these.
+    const expression = new RegExp(`${label}[^\\d-]{0,45}(-?\\d[\\d,]*(?:\\.\\d+)?)`, 'i')
     const match = text.match(expression)
     if (match?.[1]) {
       const parsed = parseNumeric(match[1])
@@ -944,27 +945,81 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'issue\\s*date',
   ])
 
-  const importT = extractNumberByLabels(text, [
+  let importT = extractNumberByLabels(text, [
     'import\\s*(?:reading|total|units|kwh)',
     'kseb\\s*import',
     'imp\\s*(?:total|reading)',
   ])
 
-  const exportT = extractNumberByLabels(text, [
+  let exportT = extractNumberByLabels(text, [
     'export\\s*(?:reading|total|units|kwh)',
     'kseb\\s*export',
     'exp\\s*(?:total|reading)',
   ])
 
-  const net = extractNumberByLabels(text, ['net\\s*(?:units|kwh|reading|usage)'])
+  let net = extractNumberByLabels(text, ['net\\s*(?:units|kwh|reading|usage)'])
 
-  const importT1 = extractNumberByLabels(text, ['import\\s*t1', 'imp\\s*t1', 't1\\s*import'])
-  const importT2 = extractNumberByLabels(text, ['import\\s*t2', 'imp\\s*t2', 't2\\s*import'])
-  const importT3 = extractNumberByLabels(text, ['import\\s*t3', 'imp\\s*t3', 't3\\s*import'])
+  const importT1 = extractNumberByLabels(text, [
+    'import\\s*t\\s*1',
+    'imp\\s*t\\s*1',
+    't\\s*1\\s*import',
+    'import\\s*t1',
+    'imp\\s*t1',
+    't1\\s*import',
+  ])
+  const importT2 = extractNumberByLabels(text, [
+    'import\\s*t\\s*2',
+    'imp\\s*t\\s*2',
+    't\\s*2\\s*import',
+    'import\\s*t2',
+    'imp\\s*t2',
+    't2\\s*import',
+  ])
+  const importT3 = extractNumberByLabels(text, [
+    'import\\s*t\\s*3',
+    'imp\\s*t\\s*3',
+    't\\s*3\\s*import',
+    'import\\s*t3',
+    'imp\\s*t3',
+    't3\\s*import',
+  ])
 
-  const exportT1 = extractNumberByLabels(text, ['export\\s*t1', 'exp\\s*t1', 't1\\s*export'])
-  const exportT2 = extractNumberByLabels(text, ['export\\s*t2', 'exp\\s*t2', 't2\\s*export'])
-  const exportT3 = extractNumberByLabels(text, ['export\\s*t3', 'exp\\s*t3', 't3\\s*export'])
+  const exportT1 = extractNumberByLabels(text, [
+    'export\\s*t\\s*1',
+    'exp\\s*t\\s*1',
+    't\\s*1\\s*export',
+    'export\\s*t1',
+    'exp\\s*t1',
+    't1\\s*export',
+  ])
+  const exportT2 = extractNumberByLabels(text, [
+    'export\\s*t\\s*2',
+    'exp\\s*t\\s*2',
+    't\\s*2\\s*export',
+    'export\\s*t2',
+    'exp\\s*t2',
+    't2\\s*export',
+  ])
+  const exportT3 = extractNumberByLabels(text, [
+    'export\\s*t\\s*3',
+    'exp\\s*t\\s*3',
+    't\\s*3\\s*export',
+    'export\\s*t3',
+    'exp\\s*t3',
+    't3\\s*export',
+  ])
+
+  if (importT === undefined && importT1 !== undefined && importT2 !== undefined && importT3 !== undefined) {
+    importT = importT1 + importT2 + importT3
+  }
+
+  if (exportT === undefined && exportT1 !== undefined && exportT2 !== undefined && exportT3 !== undefined) {
+    exportT = exportT1 + exportT2 + exportT3
+  }
+
+  if (net === undefined && importT !== undefined && exportT !== undefined) {
+    net = importT - exportT
+  }
 
   const billGeneratedAt = generatedDate ? `${generatedDate}T${dayjs().format('HH:mm')}` : undefined
 
