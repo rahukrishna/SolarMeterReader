@@ -925,6 +925,31 @@ const extractNumberByLabels = (text: string, labels: string[]) => {
         return parsed
       }
     }
+
+    // Fallback for table-like PDF text where label and value may be split across lines.
+    const labelRegex = new RegExp(label, 'i')
+    const lines = text.split('\n')
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const line = lines[lineIndex]
+      if (!labelRegex.test(line)) {
+        continue
+      }
+
+      const scanWindow = [line, lines[lineIndex + 1] ?? '', lines[lineIndex + 2] ?? ''].join(' ')
+      const numberMatches = Array.from(scanWindow.matchAll(/-?\d[\d,]*(?:\.\d+)?/g)).map(
+        (match) => match[0],
+      )
+
+      if (!numberMatches.length) {
+        continue
+      }
+
+      // Prefer the last value in the row/window (usually the current reading in bill tables).
+      const candidate = parseNumeric(numberMatches[numberMatches.length - 1])
+      if (candidate !== undefined) {
+        return candidate
+      }
+    }
   }
   return undefined
 }
@@ -948,12 +973,20 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
   let importT = extractNumberByLabels(text, [
     'import\\s*(?:reading|total|units|kwh)',
     'kseb\\s*import',
+    'import\\s*energy',
+    'import\\s*current\\s*reading',
+    'present\\s*import\\s*reading',
+    'import\\s*meter\\s*reading',
     'imp\\s*(?:total|reading)',
   ])
 
   let exportT = extractNumberByLabels(text, [
     'export\\s*(?:reading|total|units|kwh)',
     'kseb\\s*export',
+    'export\\s*energy',
+    'export\\s*current\\s*reading',
+    'present\\s*export\\s*reading',
+    'export\\s*meter\\s*reading',
     'exp\\s*(?:total|reading)',
   ])
 
@@ -963,6 +996,9 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'import\\s*t\\s*1',
     'imp\\s*t\\s*1',
     't\\s*1\\s*import',
+    'import\\s*zone\\s*1',
+    'import\\s*slot\\s*1',
+    'import\\s*normal',
     'import\\s*t1',
     'imp\\s*t1',
     't1\\s*import',
@@ -971,6 +1007,9 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'import\\s*t\\s*2',
     'imp\\s*t\\s*2',
     't\\s*2\\s*import',
+    'import\\s*zone\\s*2',
+    'import\\s*slot\\s*2',
+    'import\\s*peak',
     'import\\s*t2',
     'imp\\s*t2',
     't2\\s*import',
@@ -979,6 +1018,9 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'import\\s*t\\s*3',
     'imp\\s*t\\s*3',
     't\\s*3\\s*import',
+    'import\\s*zone\\s*3',
+    'import\\s*slot\\s*3',
+    'import\\s*off\\s*peak',
     'import\\s*t3',
     'imp\\s*t3',
     't3\\s*import',
@@ -988,6 +1030,8 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'export\\s*t\\s*1',
     'exp\\s*t\\s*1',
     't\\s*1\\s*export',
+    'export\\s*zone\\s*1',
+    'export\\s*slot\\s*1',
     'export\\s*t1',
     'exp\\s*t1',
     't1\\s*export',
@@ -996,6 +1040,8 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'export\\s*t\\s*2',
     'exp\\s*t\\s*2',
     't\\s*2\\s*export',
+    'export\\s*zone\\s*2',
+    'export\\s*slot\\s*2',
     'export\\s*t2',
     'exp\\s*t2',
     't2\\s*export',
@@ -1004,6 +1050,8 @@ const parseKsebBillText = (rawText: string): ParsedBillData => {
     'export\\s*t\\s*3',
     'exp\\s*t\\s*3',
     't\\s*3\\s*export',
+    'export\\s*zone\\s*3',
+    'export\\s*slot\\s*3',
     'export\\s*t3',
     'exp\\s*t3',
     't3\\s*export',
@@ -2352,8 +2400,7 @@ function App() {
       const extractedText = await extractBillText(file)
       const parsed = parseKsebBillText(extractedText)
 
-      const foundAnyValue =
-        parsed.billDate !== undefined ||
+      const foundMeterValues =
         parsed.importT !== undefined ||
         parsed.exportT !== undefined ||
         parsed.net !== undefined ||
@@ -2364,8 +2411,13 @@ function App() {
         parsed.exportT2 !== undefined ||
         parsed.exportT3 !== undefined
 
-      if (!foundAnyValue) {
-        setBillImportMessage('Could not detect bill fields. Please add values manually.')
+      if (!foundMeterValues) {
+        const dateHint = parsed.billDate
+          ? ` Date detected as ${dayjs(parsed.billDate).format('DD MMM YYYY')}, but meter values were not found.`
+          : ''
+        setBillImportMessage(
+          `Could not detect import/export meter values from this bill.${dateHint} Please add values manually or upload a clearer file.`,
+        )
         return
       }
 
