@@ -721,6 +721,8 @@ type WeatherDaySignal = {
   rainProbability: number
   sunshineHours: number
   radiation: number
+  tempMax?: number
+  tempMin?: number
 }
 
 type OpenMeteoDailyResponse = {
@@ -729,6 +731,8 @@ type OpenMeteoDailyResponse = {
   precipitation_probability_max?: number[]
   sunshine_duration?: number[]
   shortwave_radiation_sum?: number[]
+  temperature_2m_max?: number[]
+  temperature_2m_min?: number[]
 }
 
 type OpenMeteoResponse = {
@@ -1069,6 +1073,7 @@ function App() {
   const [solarLogValue, setSolarLogValue] = useState('')
   const [solarLogNote, setSolarLogNote] = useState('')
   const [showDailyBreakdown, setShowDailyBreakdown] = useState(false)
+  const [showWeatherOutlook, setShowWeatherOutlook] = useState(false)
   const [solarDailySummaries, setSolarDailySummaries] = useState<SolarDailySummary[]>([])
   const [eodSolarTotalInput, setEodSolarTotalInput] = useState('')
   const [eodSolarNoteInput, setEodSolarNoteInput] = useState('')
@@ -1210,7 +1215,7 @@ function App() {
           start_date: today,
           end_date: forecastEnd,
           daily:
-            'cloud_cover_mean,precipitation_probability_max,sunshine_duration,shortwave_radiation_sum',
+            'cloud_cover_mean,precipitation_probability_max,sunshine_duration,shortwave_radiation_sum,temperature_2m_max,temperature_2m_min',
         })
 
         const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`)
@@ -1234,6 +1239,8 @@ function App() {
             rainProbability: Number(daily.precipitation_probability_max?.[index] ?? 40),
             sunshineHours: Number(daily.sunshine_duration?.[index] ?? 21600) / 3600,
             radiation: Number(daily.shortwave_radiation_sum?.[index] ?? 12),
+            tempMax: daily.temperature_2m_max?.[index] != null ? Number(daily.temperature_2m_max[index]) : undefined,
+            tempMin: daily.temperature_2m_min?.[index] != null ? Number(daily.temperature_2m_min[index]) : undefined,
           }
         }
 
@@ -1917,6 +1924,88 @@ function App() {
       },
     }
   }, [normalizedDailySeries, weatherSignals, forecastCalibration, solarUsageLogs])
+
+  const upcomingForecast = useMemo(() => {
+    if (!derivedReadings.length) return []
+
+    const recentDaily = normalizedDailySeries.slice(-Math.min(28, normalizedDailySeries.length))
+    if (!recentDaily.length) return []
+
+    const importSeries = recentDaily.map((row) => Math.max(0, row.import))
+    const exportSeries = recentDaily.map((row) => Math.max(0, row.export))
+    const solarSeries = recentDaily.map((row) => Math.max(0, row.solar))
+
+    const baseImport =
+      (average(importSeries) * 0.6 + median(importSeries) * 0.4) * forecastCalibration.import
+    const baseExport =
+      (average(exportSeries) * 0.6 + median(exportSeries) * 0.4) * forecastCalibration.export
+    const baseSolar =
+      (average(solarSeries) * 0.6 + median(solarSeries) * 0.4) * forecastCalibration.solar
+
+    const importSlope = calculateLinearSlope(importSeries)
+    const exportSlope = calculateLinearSlope(exportSeries)
+    const solarSlope = calculateLinearSlope(solarSeries)
+
+    const weekdaySums = Array.from({ length: 7 }, () => ({
+      import: 0, export: 0, solar: 0, count: 0,
+    }))
+    for (const row of recentDaily) {
+      const wd = dayjs(row.date).day()
+      weekdaySums[wd].import += Math.max(0, row.import)
+      weekdaySums[wd].export += Math.max(0, row.export)
+      weekdaySums[wd].solar += Math.max(0, row.solar)
+      weekdaySums[wd].count += 1
+    }
+
+    const weekdayFactor = (metric: 'import' | 'export' | 'solar', wd: number) => {
+      const baseline = metric === 'import' ? baseImport : metric === 'export' ? baseExport : baseSolar
+      if (baseline <= 0) return 1
+      const bucket = weekdaySums[wd]
+      const dayAverage = bucket.count > 0 ? bucket[metric] / bucket.count : baseline
+      return clamp(dayAverage / baseline, 0.7, 1.35)
+    }
+
+    const volatility = baseImport > 0 ? standardDeviation(importSeries) / baseImport : 1
+    const confidenceScore = clamp(
+      Math.round(45 + clamp(recentDaily.length / 28, 0, 1) * 30 - clamp(volatility, 0, 1.2) * 16),
+      38,
+      94,
+    )
+
+    return [1, 2].map((daysAhead) => {
+      const targetDate = dayjs().add(daysAhead, 'day')
+      const dateKey = targetDate.format('YYYY-MM-DD')
+      const wd = targetDate.day()
+      const weatherSignal = weatherSignals[dateKey]
+      const multipliers = getWeatherAdjustedMultipliers(dateKey, weatherSignal)
+
+      const expectedImport = clamp(
+        (baseImport + importSlope * daysAhead) * weekdayFactor('import', wd) * multipliers.import,
+        0, Number.MAX_SAFE_INTEGER,
+      )
+      const expectedExport = clamp(
+        (baseExport + exportSlope * daysAhead) * weekdayFactor('export', wd) * multipliers.export,
+        0, Number.MAX_SAFE_INTEGER,
+      )
+      const expectedSolar = clamp(
+        (baseSolar + solarSlope * daysAhead) * weekdayFactor('solar', wd) * multipliers.solar,
+        0, Number.MAX_SAFE_INTEGER,
+      )
+      const expectedNet = expectedImport - expectedExport
+
+      return {
+        date: dateKey,
+        label: daysAhead === 1 ? 'Tomorrow' : 'Day After',
+        expectedImport,
+        expectedExport,
+        expectedSolar,
+        expectedNet,
+        confidenceScore: Math.max(confidenceScore - daysAhead * 4, 30),
+        weatherDriven: multipliers.hasLiveWeather,
+        weatherSignal,
+      }
+    })
+  }, [normalizedDailySeries, weatherSignals, forecastCalibration, derivedReadings.length])
 
   const manualSolarToday = useMemo(() => {
     const todayKey = dayjs().format('YYYY-MM-DD')
@@ -3843,7 +3932,64 @@ function App() {
           )}
         </article>
 
-        <article>
+        <article className="weather-outlook-article">
+          <div className="section-head">
+            <h2>7-Day Weather Outlook</h2>
+            <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center' }}>
+              <span className="field-hint" style={{ margin: 0 }}>
+                {weatherStatus === 'loading' ? '⏳ Loading...' : weatherStatus === 'ready' ? '✓ Live – Irimbiliyam' : weatherStatus === 'error' ? '⚠ Offline' : ''}
+              </span>
+              <button
+                type="button"
+                className="ghost breakdown-toggle"
+                style={{ margin: 0 }}
+                onClick={() => setShowWeatherOutlook((prev) => !prev)}
+              >
+                {showWeatherOutlook ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </div>
+          {showWeatherOutlook && weatherStatus === 'ready' && Object.keys(weatherSignals).length > 0 ? (
+            <div className="weather-week-grid">
+              {Array.from({ length: 7 }, (_, i) => ({ d: dayjs().add(i, 'day'), i })).map(({ d, i }) => {
+                const key = d.format('YYYY-MM-DD')
+                const sig = weatherSignals[key]
+                if (!sig) return null
+                const isToday = i === 0
+                const cloud = sig.cloudCover
+                const weatherIcon =
+                  sig.rainProbability >= 60 ? '🌧'
+                  : sig.rainProbability >= 30 ? '🌦'
+                  : cloud >= 70 ? '☁'
+                  : cloud >= 35 ? '⛅'
+                  : '☀'
+                return (
+                  <div key={key} className={`weather-day-card${isToday ? ' weather-day-today' : ''}`}>
+                    <div className="weather-day-name">{isToday ? 'Today' : d.format('ddd')}</div>
+                    <div className="weather-day-date">{d.format('DD MMM')}</div>
+                    <div className="weather-day-icon">{weatherIcon}</div>
+                    {sig.tempMax != null && sig.tempMin != null && (
+                      <div className="weather-day-temp">
+                        <span className="temp-max">{sig.tempMax.toFixed(0)}°</span>
+                        <span className="temp-min">{sig.tempMin.toFixed(0)}°</span>
+                      </div>
+                    )}
+                    <div className="weather-day-stats">
+                      <span title="Rain probability">🌧 {sig.rainProbability.toFixed(0)}%</span>
+                      <span title="Sunshine hours">☀ {sig.sunshineHours.toFixed(1)}h</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : showWeatherOutlook && weatherStatus === 'loading' ? (
+            <p className="empty-state">Fetching weather data…</p>
+          ) : showWeatherOutlook ? (
+            <p className="empty-state">Weather unavailable. Forecasts use seasonal model.</p>
+          ) : null}
+        </article>
+
+        <article className="forecast-full-article">
           <h2>Daily Forecast</h2>
           {todayForecast ? (
             <>
@@ -3919,6 +4065,39 @@ function App() {
                   Last solar log: {dayjs(latestSolarLog.timestamp).format('DD MMM HH:mm')} |
                   {' '}{latestSolarLog.value.toFixed(2)} kWh
                 </p>
+              )}
+              {upcomingForecast.length > 0 && (
+                <>
+                  <h3 style={{ marginTop: '1.1rem', marginBottom: '0.5rem', fontSize: '0.97rem' }}>
+                    Upcoming 2-Day Outlook
+                  </h3>
+                  <div className="upcoming-forecast-grid">
+                    {upcomingForecast.map((day) => (
+                      <div key={day.date} className="upcoming-forecast-card">
+                        <div className="upcoming-forecast-header">
+                          <strong>{day.label}</strong>
+                          <span className="field-hint" style={{ margin: 0 }}>
+                            {dayjs(day.date).format('ddd, DD MMM')}
+                          </span>
+                          <span className="field-hint" style={{ margin: 0, fontSize: '0.75rem' }}>
+                            {day.weatherDriven ? 'weather-driven' : 'seasonal'} · {day.confidenceScore}% confidence
+                          </span>
+                        </div>
+                        <div className="upcoming-forecast-metrics">
+                          <div><span>Solar</span><strong>{formatUnits(day.expectedSolar)}</strong></div>
+                          <div><span>Import</span><strong>{formatUnits(day.expectedImport)}</strong></div>
+                          <div><span>Export</span><strong>{formatUnits(day.expectedExport)}</strong></div>
+                          <div><span>Net</span><strong>{formatUnits(day.expectedNet)}</strong></div>
+                        </div>
+                        {day.weatherSignal && (
+                          <p className="field-hint" style={{ marginBottom: 0, fontSize: '0.75rem' }}>
+                            ☁ {day.weatherSignal.cloudCover.toFixed(0)}% cloud · 🌧 {day.weatherSignal.rainProbability.toFixed(0)}% rain · ☀ {day.weatherSignal.sunshineHours.toFixed(1)}h sun
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
               )}
             </>
           ) : (
