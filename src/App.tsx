@@ -177,6 +177,7 @@ const DAILY_FORECAST_SNAPSHOT_KEY = 'solar-meter-daily-forecast-snapshots-v1'
 const FORECAST_AUDIT_KEY = 'solar-meter-forecast-audit-v1'
 const SOLAR_USAGE_LOG_KEY = 'solar-meter-solar-usage-log-v1'
 const SOLAR_DAILY_SUMMARY_KEY = 'solar-meter-solar-daily-summary-v1'
+const FIRST_LAUNCH_AUTH_KEY = 'solar-meter-first-launch-auth-v1'
 const DATA_VERSION = 3
 
 const seededReadings: Reading[] = [
@@ -689,6 +690,80 @@ const calculateLinearSlope = (values: number[]) => {
   return (n * sumXY - sumX * sumY) / denominator
 }
 
+const percentile = (values: number[], percentileRank: number) => {
+  if (!values.length) {
+    return 0
+  }
+
+  const sorted = [...values].sort((a, b) => a - b)
+  const index = (sorted.length - 1) * percentileRank
+  const low = Math.floor(index)
+  const high = Math.ceil(index)
+
+  if (low === high) {
+    return sorted[low]
+  }
+
+  const ratio = index - low
+  return sorted[low] * (1 - ratio) + sorted[high] * ratio
+}
+
+const buildOutlierBounds = (values: number[]) => {
+  if (values.length < 5) {
+    return { min: 0, max: Number.MAX_SAFE_INTEGER }
+  }
+
+  const q1 = percentile(values, 0.25)
+  const q3 = percentile(values, 0.75)
+  const iqr = q3 - q1
+
+  if (iqr <= 0) {
+    return {
+      min: Math.max(0, q1 * 0.5),
+      max: q3 * 1.8 + 0.001,
+    }
+  }
+
+  return {
+    min: Math.max(0, q1 - 1.5 * iqr),
+    max: q3 + 1.5 * iqr,
+  }
+}
+
+const sanitizeDailyUsageForForecast = (rows: DailyUsagePoint[]) => {
+  if (!rows.length) {
+    return rows
+  }
+
+  const normalized = rows.map((row) => ({
+    ...row,
+    import: Math.max(0, row.import),
+    export: Math.max(0, row.export),
+    solar: Math.max(0, row.solar),
+  }))
+
+  const importBounds = buildOutlierBounds(normalized.map((row) => row.import))
+  const exportBounds = buildOutlierBounds(normalized.map((row) => row.export))
+  const solarBounds = buildOutlierBounds(normalized.map((row) => row.solar))
+
+  const filtered = normalized.filter(
+    (row) =>
+      row.import >= importBounds.min &&
+      row.import <= importBounds.max &&
+      row.export >= exportBounds.min &&
+      row.export <= exportBounds.max &&
+      row.solar >= solarBounds.min &&
+      row.solar <= solarBounds.max,
+  )
+
+  // Keep enough samples; fallback to normalized if filtering is too aggressive.
+  if (filtered.length < Math.max(7, Math.floor(normalized.length * 0.6))) {
+    return normalized
+  }
+
+  return filtered
+}
+
 const getKeralaSeasonalMultipliers = (dateValue: string) => {
   const month = dayjs(dateValue).month()
 
@@ -722,8 +797,11 @@ type WeatherDaySignal = {
   rainProbability: number
   sunshineHours: number
   radiation: number
+  windSpeedMax?: number
   tempMax?: number
   tempMin?: number
+  sunrise?: string
+  sunset?: string
 }
 
 type OpenMeteoDailyResponse = {
@@ -732,12 +810,65 @@ type OpenMeteoDailyResponse = {
   precipitation_probability_max?: number[]
   sunshine_duration?: number[]
   shortwave_radiation_sum?: number[]
+  wind_speed_10m_max?: number[]
   temperature_2m_max?: number[]
   temperature_2m_min?: number[]
+  sunrise?: string[]
+  sunset?: string[]
 }
 
 type OpenMeteoResponse = {
   daily?: OpenMeteoDailyResponse
+}
+
+const formatWeatherClock = (value?: string) => {
+  if (!value) {
+    return '--'
+  }
+  const parsed = dayjs(value)
+  return parsed.isValid() ? parsed.format('HH:mm') : '--'
+}
+
+const buildOneLineWeatherReport = (signal?: WeatherDaySignal) => {
+  if (!signal) {
+    return 'Weather report unavailable.'
+  }
+
+  const skyText =
+    signal.rainProbability >= 60
+      ? 'Rain can be expected today'
+      : signal.rainProbability >= 35
+        ? 'Light showers are possible'
+        : signal.cloudCover >= 70
+          ? 'Sky will stay mostly cloudy'
+          : signal.cloudCover >= 35
+            ? 'Sun should be visible between cloud breaks'
+            : 'Mostly sunny conditions are expected'
+
+  const tempText =
+    signal.tempMax != null && signal.tempMin != null
+      ? `, ${signal.tempMin.toFixed(0)}°-${signal.tempMax.toFixed(0)}°C`
+      : ''
+
+  const sunWindowText =
+    signal.sunshineHours >= 7
+      ? 'good sun visibility for most of the day'
+      : signal.sunshineHours >= 4
+        ? 'sun should be visible for a few hours'
+        : signal.sunshineHours >= 1.5
+          ? 'brief sunny breaks are likely'
+          : 'very limited sun visibility is expected'
+
+  const windText =
+    signal.windSpeedMax != null
+      ? signal.windSpeedMax >= 25
+        ? `strong wind up to ${signal.windSpeedMax.toFixed(0)} km/h`
+        : signal.windSpeedMax >= 15
+          ? `moderate wind up to ${signal.windSpeedMax.toFixed(0)} km/h`
+          : `light wind around ${signal.windSpeedMax.toFixed(0)} km/h`
+      : 'light to moderate wind is expected'
+
+  return `${skyText}${tempText}. ${sunWindowText}. ${windText}. Rain chance ${signal.rainProbability.toFixed(0)}%.`
 }
 
 const getWeatherAdjustedMultipliers = (
@@ -1171,6 +1302,9 @@ function App() {
   const [weatherSignals, setWeatherSignals] = useState<Record<string, WeatherDaySignal>>({})
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>('idle')
   const [weatherMessage, setWeatherMessage] = useState('')
+  const [dailyForecastSnapshots, setDailyForecastSnapshots] = useState<
+    Record<string, DailyForecastSnapshot>
+  >({})
   const [forecastAudits, setForecastAudits] = useState<ForecastAuditEntry[]>([])
   const [solarUsageLogs, setSolarUsageLogs] = useState<SolarUsageEntry[]>([])
   const [isSolarLogModalOpen, setIsSolarLogModalOpen] = useState(false)
@@ -1181,12 +1315,20 @@ function App() {
   const [solarDailySummaries, setSolarDailySummaries] = useState<SolarDailySummary[]>([])
   const [eodSolarTotalInput, setEodSolarTotalInput] = useState('')
   const [eodSolarNoteInput, setEodSolarNoteInput] = useState('')
+  const [requiresFirstLaunchAuth, setRequiresFirstLaunchAuth] = useState(true)
+  const [firstLaunchEmail, setFirstLaunchEmail] = useState('')
+  const [firstLaunchPassword, setFirstLaunchPassword] = useState('')
+  const [firstLaunchAuthBusy, setFirstLaunchAuthBusy] = useState(false)
+  const [firstLaunchAuthError, setFirstLaunchAuthError] = useState('')
 
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
     const rawSettings = localStorage.getItem(SETTINGS_KEY)
+    const firstLaunchAuth = localStorage.getItem(FIRST_LAUNCH_AUTH_KEY)
     const versionRaw = localStorage.getItem(DATA_VERSION_KEY)
     const version = versionRaw ? Number(versionRaw) : 0
+
+    setRequiresFirstLaunchAuth(firstLaunchAuth !== 'done')
 
     if (rawReadings) {
       const parsed = JSON.parse(rawReadings) as Reading[]
@@ -1241,6 +1383,12 @@ function App() {
       setForecastAudits(parsed.slice(0, 40))
     }
 
+    const rawForecastSnapshots = localStorage.getItem(DAILY_FORECAST_SNAPSHOT_KEY)
+    if (rawForecastSnapshots) {
+      const parsed = JSON.parse(rawForecastSnapshots) as Record<string, DailyForecastSnapshot>
+      setDailyForecastSnapshots(parsed)
+    }
+
     const rawSolarUsage = localStorage.getItem(SOLAR_USAGE_LOG_KEY)
     if (rawSolarUsage) {
       const parsed = JSON.parse(rawSolarUsage) as SolarUsageEntry[]
@@ -1262,6 +1410,13 @@ function App() {
     }
     localStorage.setItem(FORECAST_AUDIT_KEY, JSON.stringify(forecastAudits.slice(0, 40)))
   }, [forecastAudits, isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    localStorage.setItem(DAILY_FORECAST_SNAPSHOT_KEY, JSON.stringify(dailyForecastSnapshots))
+  }, [dailyForecastSnapshots, isHydrated])
 
   useEffect(() => {
     if (!isHydrated) {
@@ -1290,11 +1445,19 @@ function App() {
     void supabase.auth.getUser().then(({ data }) => {
       if (isMounted) {
         setCloudUser(data.user ?? null)
+        if (data.user) {
+          localStorage.setItem(FIRST_LAUNCH_AUTH_KEY, 'done')
+          setRequiresFirstLaunchAuth(false)
+        }
       }
     })
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setCloudUser(session?.user ?? null)
+      if (session?.user) {
+        localStorage.setItem(FIRST_LAUNCH_AUTH_KEY, 'done')
+        setRequiresFirstLaunchAuth(false)
+      }
     })
 
     return () => {
@@ -1319,7 +1482,7 @@ function App() {
           start_date: today,
           end_date: forecastEnd,
           daily:
-            'cloud_cover_mean,precipitation_probability_max,sunshine_duration,shortwave_radiation_sum,temperature_2m_max,temperature_2m_min',
+            'cloud_cover_mean,precipitation_probability_max,sunshine_duration,shortwave_radiation_sum,wind_speed_10m_max,temperature_2m_max,temperature_2m_min,sunrise,sunset',
         })
 
         const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`)
@@ -1343,8 +1506,14 @@ function App() {
             rainProbability: Number(daily.precipitation_probability_max?.[index] ?? 40),
             sunshineHours: Number(daily.sunshine_duration?.[index] ?? 21600) / 3600,
             radiation: Number(daily.shortwave_radiation_sum?.[index] ?? 12),
+            windSpeedMax:
+              daily.wind_speed_10m_max?.[index] != null
+                ? Number(daily.wind_speed_10m_max[index])
+                : undefined,
             tempMax: daily.temperature_2m_max?.[index] != null ? Number(daily.temperature_2m_max[index]) : undefined,
             tempMin: daily.temperature_2m_min?.[index] != null ? Number(daily.temperature_2m_min[index]) : undefined,
+            sunrise: daily.sunrise?.[index],
+            sunset: daily.sunset?.[index],
           }
         }
 
@@ -1449,6 +1618,10 @@ function App() {
     () => buildNormalizedDailyUsageSeries(derivedReadings),
     [derivedReadings],
   )
+  const completedDailySeries = useMemo(() => {
+    const todayStart = dayjs().startOf('day')
+    return normalizedDailySeries.filter((row) => dayjs(row.date).isBefore(todayStart, 'day'))
+  }, [normalizedDailySeries])
 
   const forecastCalibration = useMemo(() => {
     if (!forecastAudits.length) {
@@ -1769,10 +1942,12 @@ function App() {
       return null
     }
 
-    const recent = dailyUsage.slice(-Math.min(21, dailyUsage.length))
-    const importSeries = recent.map((row) => Math.max(0, row.import))
-    const exportSeries = recent.map((row) => Math.max(0, row.export))
-    const solarSeries = recent.map((row) => Math.max(0, row.solar))
+    const recent = sanitizeDailyUsageForForecast(
+      dailyUsage.slice(-Math.min(21, dailyUsage.length)),
+    )
+    const importSeries = recent.map((row) => row.import)
+    const exportSeries = recent.map((row) => row.export)
+    const solarSeries = recent.map((row) => row.solar)
 
     const baseImport =
       (average(importSeries) * 0.6 + median(importSeries) * 0.4) * forecastCalibration.import
@@ -1897,18 +2072,16 @@ function App() {
   ])
 
   const todayForecast = useMemo(() => {
-    if (!derivedReadings.length) {
-      return null
-    }
-
-    const recentDaily = normalizedDailySeries.slice(-Math.min(28, normalizedDailySeries.length))
+    const recentDaily = sanitizeDailyUsageForForecast(
+      completedDailySeries.slice(-Math.min(28, completedDailySeries.length)),
+    )
     if (!recentDaily.length) {
       return null
     }
 
-    const importSeries = recentDaily.map((row) => Math.max(0, row.import))
-    const exportSeries = recentDaily.map((row) => Math.max(0, row.export))
-    const solarSeries = recentDaily.map((row) => Math.max(0, row.solar))
+    const importSeries = recentDaily.map((row) => row.import)
+    const exportSeries = recentDaily.map((row) => row.export)
+    const solarSeries = recentDaily.map((row) => row.solar)
 
     const baseImport =
       (average(importSeries) * 0.6 + median(importSeries) * 0.4) * forecastCalibration.import
@@ -2027,17 +2200,36 @@ function App() {
         calibrationSolarFactor: forecastCalibration.solar,
       },
     }
-  }, [normalizedDailySeries, weatherSignals, forecastCalibration, solarUsageLogs])
+  }, [completedDailySeries, weatherSignals, forecastCalibration, solarUsageLogs])
+
+  const displayedTodayForecast = useMemo(() => {
+    if (!todayForecast) {
+      return null
+    }
+
+    const snapshot = dailyForecastSnapshots[todayForecast.date]
+    if (!snapshot) {
+      return todayForecast
+    }
+
+    return {
+      ...todayForecast,
+      expectedImport: snapshot.predictedImport,
+      expectedExport: snapshot.predictedExport,
+      expectedSolar: snapshot.predictedSolar,
+      expectedNet: snapshot.predictedNet,
+    }
+  }, [dailyForecastSnapshots, todayForecast])
 
   const upcomingForecast = useMemo(() => {
-    if (!derivedReadings.length) return []
-
-    const recentDaily = normalizedDailySeries.slice(-Math.min(28, normalizedDailySeries.length))
+    const recentDaily = sanitizeDailyUsageForForecast(
+      completedDailySeries.slice(-Math.min(28, completedDailySeries.length)),
+    )
     if (!recentDaily.length) return []
 
-    const importSeries = recentDaily.map((row) => Math.max(0, row.import))
-    const exportSeries = recentDaily.map((row) => Math.max(0, row.export))
-    const solarSeries = recentDaily.map((row) => Math.max(0, row.solar))
+    const importSeries = recentDaily.map((row) => row.import)
+    const exportSeries = recentDaily.map((row) => row.export)
+    const solarSeries = recentDaily.map((row) => row.solar)
 
     const baseImport =
       (average(importSeries) * 0.6 + median(importSeries) * 0.4) * forecastCalibration.import
@@ -2109,7 +2301,7 @@ function App() {
         weatherSignal,
       }
     })
-  }, [normalizedDailySeries, weatherSignals, forecastCalibration, derivedReadings.length])
+  }, [completedDailySeries, weatherSignals, forecastCalibration])
 
   const manualSolarToday = useMemo(() => {
     const todayKey = dayjs().format('YYYY-MM-DD')
@@ -2316,6 +2508,67 @@ function App() {
     if (cloudUser) {
       setSyncStatus('idle')
     }
+  }
+
+  const completeFirstLaunchAuth = () => {
+    localStorage.setItem(FIRST_LAUNCH_AUTH_KEY, 'done')
+    setRequiresFirstLaunchAuth(false)
+    setFirstLaunchPassword('')
+    setFirstLaunchAuthError('')
+    setActiveTab('home')
+  }
+
+  const handleFirstLaunchSignIn = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    const email = firstLaunchEmail.trim()
+    const password = firstLaunchPassword.trim()
+
+    if (!email || !password) {
+      setFirstLaunchAuthError('Enter your email and password.')
+      return
+    }
+
+    if (!supabase) {
+      setFirstLaunchAuthError(
+        'Secure login is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.',
+      )
+      return
+    }
+
+    setFirstLaunchAuthBusy(true)
+    setFirstLaunchAuthError('')
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+
+      if (error || !data.user) {
+        setFirstLaunchAuthError(error?.message ?? 'Invalid email or password.')
+        return
+      }
+
+      setCloudUser(data.user)
+      setCloudEmail(email)
+      completeFirstLaunchAuth()
+    } finally {
+      setFirstLaunchAuthBusy(false)
+    }
+  }
+
+  const recomputeTodayForecast = () => {
+    if (!todayForecast) {
+      setAppToast('Today forecast is not ready yet.')
+      return
+    }
+
+    setDailyForecastSnapshots((prev) => {
+      const nextSnapshots = { ...prev }
+      delete nextSnapshots[todayForecast.date]
+      return nextSnapshots
+    })
+
+    setAppToast('Today forecast recalculated using current weather and model data.')
+    logActivity('recompute-forecast', `Manual refresh for ${todayForecast.date}`)
   }
 
   const saveBillingConfigFromBill = () => {
@@ -3130,25 +3383,31 @@ function App() {
       return
     }
 
-    const snapshotRaw = localStorage.getItem(DAILY_FORECAST_SNAPSHOT_KEY)
-    const snapshots = snapshotRaw
-      ? (JSON.parse(snapshotRaw) as Record<string, DailyForecastSnapshot>)
-      : {}
-
-    snapshots[todayForecast.date] = {
-      date: todayForecast.date,
-      predictedImport: todayForecast.expectedImport,
-      predictedExport: todayForecast.expectedExport,
-      predictedSolar: todayForecast.expectedSolar,
-      predictedNet: todayForecast.expectedNet,
-      createdAt: new Date().toISOString(),
+    if (dailyForecastSnapshots[todayForecast.date]) {
+      return
     }
 
-    localStorage.setItem(DAILY_FORECAST_SNAPSHOT_KEY, JSON.stringify(snapshots))
+    setDailyForecastSnapshots((prev) => ({
+      ...prev,
+      [todayForecast.date]: {
+        date: todayForecast.date,
+        predictedImport: todayForecast.expectedImport,
+        predictedExport: todayForecast.expectedExport,
+        predictedSolar: todayForecast.expectedSolar,
+        predictedNet: todayForecast.expectedNet,
+        createdAt: new Date().toISOString(),
+      },
+    }))
+  }, [todayForecast, dailyForecastSnapshots, isHydrated])
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
 
     const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
     const actualYesterday = normalizedDailySeries.find((row) => row.date === yesterday)
-    const snapshotYesterday = snapshots[yesterday]
+    const snapshotYesterday = dailyForecastSnapshots[yesterday]
 
     if (!actualYesterday || !snapshotYesterday) {
       return
@@ -3188,7 +3447,64 @@ function App() {
     }
 
     setForecastAudits((prev) => [audit, ...prev].slice(0, 40))
-  }, [todayForecast, normalizedDailySeries, forecastAudits, isHydrated])
+  }, [dailyForecastSnapshots, normalizedDailySeries, forecastAudits, isHydrated])
+
+  if (!isHydrated) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <h1>Loading Solar Meter Reader...</h1>
+        </section>
+      </main>
+    )
+  }
+
+  if (requiresFirstLaunchAuth) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <h1>Secure Login Required</h1>
+          <p className="field-hint">
+            Sign in with your account to open your dashboard.
+          </p>
+          <form className="auth-form" onSubmit={(event) => void handleFirstLaunchSignIn(event)}>
+            <label>
+              Email
+              <input
+                type="email"
+                value={firstLaunchEmail}
+                onChange={(event) => setFirstLaunchEmail(event.target.value)}
+                autoComplete="username"
+                required
+              />
+            </label>
+            <label>
+              Password
+              <input
+                type="password"
+                value={firstLaunchPassword}
+                onChange={(event) => setFirstLaunchPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </label>
+            <button type="submit" disabled={firstLaunchAuthBusy || !isCloudEnabled}>
+              {firstLaunchAuthBusy ? 'Signing In...' : 'Continue To Dashboard'}
+            </button>
+          </form>
+          {!isCloudEnabled && (
+            <p className="cloud-message">
+              Secure login is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env.
+            </p>
+          )}
+          {firstLaunchAuthError && <p className="cloud-message">{firstLaunchAuthError}</p>}
+          <p className="field-hint">
+            This prompt appears only on first launch for this device.
+          </p>
+        </section>
+      </main>
+    )
+  }
 
   return (
     <main className="app-shell">
@@ -3563,11 +3879,11 @@ function App() {
             <p>{formatUnits(currentMonthTracker.payableUnits)}</p>
           </article>
           <article className="critical-tile import">
-            <h3>This Month Import Used</h3>
+            <h3>This Month's Imported Energy</h3>
             <p>{formatUnits(currentMonthTracker.importConsumed)}</p>
           </article>
           <article className="critical-tile export">
-            <h3>This Month Export Used</h3>
+            <h3>This Month's Exported Energy</h3>
             <p>{formatUnits(currentMonthTracker.exportConsumed)}</p>
           </article>
         </div>
@@ -3659,7 +3975,7 @@ function App() {
           </div>
           <div>
             <span>Expected Solar Today</span>
-            <strong>{formatUnits(todayForecast?.expectedSolar ?? 0)}</strong>
+            <strong>{formatUnits(displayedTodayForecast?.expectedSolar ?? 0)}</strong>
           </div>
           <div>
             <span>Effective EOD Solar</span>
@@ -4086,6 +4402,10 @@ function App() {
                       <span title="Rain probability">🌧 {sig.rainProbability.toFixed(0)}%</span>
                       <span title="Sunshine hours">☀ {sig.sunshineHours.toFixed(1)}h</span>
                     </div>
+                    <div className="weather-day-stats">
+                      <span title="Sunrise">🌅 {formatWeatherClock(sig.sunrise)}</span>
+                      <span title="Sunset">🌇 {formatWeatherClock(sig.sunset)}</span>
+                    </div>
                   </div>
                 )
               })}
@@ -4098,33 +4418,43 @@ function App() {
         </article>
 
         <article className="forecast-full-article">
-          <h2>Daily Forecast</h2>
-          {todayForecast ? (
+          <div className="section-head">
+            <h2>Daily Forecast</h2>
+            <button
+              type="button"
+              className="ghost"
+              onClick={recomputeTodayForecast}
+              disabled={!todayForecast}
+            >
+              Recompute Today Forecast
+            </button>
+          </div>
+          {displayedTodayForecast ? (
             <>
               <p className="field-hint">
-                {dayjs(todayForecast.date).format('DD MMM YYYY')}
-                {todayForecast.weatherDriven ? ' - weather-driven' : ' - seasonal fallback'}
+                {dayjs(displayedTodayForecast.date).format('DD MMM YYYY')}
+                {displayedTodayForecast.weatherDriven ? ' - weather-driven' : ' - seasonal fallback'}
               </p>
               <div className="tracker-metrics">
                 <div>
                   <span>Expected Solar</span>
-                  <strong>{formatUnits(todayForecast.expectedSolar)}</strong>
+                  <strong>{formatUnits(displayedTodayForecast.expectedSolar)}</strong>
                 </div>
                 <div>
                   <span>Expected Import</span>
-                  <strong>{formatUnits(todayForecast.expectedImport)}</strong>
+                  <strong>{formatUnits(displayedTodayForecast.expectedImport)}</strong>
                 </div>
                 <div>
                   <span>Expected Export</span>
-                  <strong>{formatUnits(todayForecast.expectedExport)}</strong>
+                  <strong>{formatUnits(displayedTodayForecast.expectedExport)}</strong>
                 </div>
                 <div>
                   <span>Expected Net</span>
-                  <strong>{formatUnits(todayForecast.expectedNet)}</strong>
+                  <strong>{formatUnits(displayedTodayForecast.expectedNet)}</strong>
                 </div>
                 <div>
                   <span>Daily Confidence</span>
-                  <strong>{todayForecast.confidenceScore}%</strong>
+                  <strong>{displayedTodayForecast.confidenceScore}%</strong>
                 </div>
                 <div>
                     <span>Latest Manual Solar Reading</span>
@@ -4132,18 +4462,28 @@ function App() {
                 </div>
                 <div>
                   <span>Forecast vs Current Reading Gap</span>
-                  <strong>{formatUnits(todayForecast.expectedSolar - manualSolarToday)}</strong>
+                  <strong>{formatUnits(displayedTodayForecast.expectedSolar - manualSolarToday)}</strong>
                 </div>
               </div>
-              {todayForecast.weatherSignal && (
-                <p className="field-hint">
-                  Weather inputs: Cloud {todayForecast.weatherSignal.cloudCover.toFixed(0)}% |
-                  Rain chance {todayForecast.weatherSignal.rainProbability.toFixed(0)}% |
-                  Sunshine {todayForecast.weatherSignal.sunshineHours.toFixed(1)}h
-                </p>
+              {displayedTodayForecast.weatherSignal && (
+                <>
+                  <p className="field-hint">
+                    Weather inputs: Cloud {displayedTodayForecast.weatherSignal.cloudCover.toFixed(0)}% |
+                    Rain chance {displayedTodayForecast.weatherSignal.rainProbability.toFixed(0)}% |
+                    Sunshine {displayedTodayForecast.weatherSignal.sunshineHours.toFixed(1)}h |
+                    {displayedTodayForecast.weatherSignal.windSpeedMax != null
+                      ? `Wind ${displayedTodayForecast.weatherSignal.windSpeedMax.toFixed(0)} km/h`
+                      : 'Wind estimate only'} |
+                    Sunrise {formatWeatherClock(displayedTodayForecast.weatherSignal.sunrise)} |
+                    Sunset {formatWeatherClock(displayedTodayForecast.weatherSignal.sunset)}
+                  </p>
+                  <p className="field-hint" style={{ marginTop: '-0.15rem' }}>
+                    Weather report: {buildOneLineWeatherReport(displayedTodayForecast.weatherSignal)}
+                  </p>
+                </>
               )}
               <p className="field-hint">
-                Real-time adjustment uses today's latest manual solar reading: {todayForecast.loggedSolarToday.toFixed(2)} kWh
+                Real-time adjustment uses today's latest manual solar reading: {displayedTodayForecast.loggedSolarToday.toFixed(2)} kWh
               </p>
               <button
                 type="button"
@@ -4155,16 +4495,16 @@ function App() {
               {showDailyBreakdown && (
                 <div className="breakdown-panel">
                   <p>
-                    Base solar: {todayForecast.breakdown.baseSolar.toFixed(2)} | Trend:
-                    {' '}{todayForecast.breakdown.solarSlope.toFixed(3)}
+                    Base solar: {displayedTodayForecast.breakdown.baseSolar.toFixed(2)} | Trend:
+                    {' '}{displayedTodayForecast.breakdown.solarSlope.toFixed(3)}
                   </p>
                   <p>
-                    Weekday factor: {todayForecast.breakdown.weekdaySolarFactor.toFixed(2)} |
-                    Weather factor: {todayForecast.breakdown.weatherSolarFactor.toFixed(2)}
+                    Weekday factor: {displayedTodayForecast.breakdown.weekdaySolarFactor.toFixed(2)} |
+                    Weather factor: {displayedTodayForecast.breakdown.weatherSolarFactor.toFixed(2)}
                   </p>
                   <p>
-                    Calibration factor: {todayForecast.breakdown.calibrationSolarFactor.toFixed(2)}
-                    {' '}| Final expected solar: {todayForecast.expectedSolar.toFixed(3)} kWh
+                    Calibration factor: {displayedTodayForecast.breakdown.calibrationSolarFactor.toFixed(2)}
+                    {' '}| Final expected solar: {displayedTodayForecast.expectedSolar.toFixed(3)} kWh
                   </p>
                 </div>
               )}
@@ -4198,9 +4538,14 @@ function App() {
                           <div><span>Net</span><strong>{formatUnits(day.expectedNet)}</strong></div>
                         </div>
                         {day.weatherSignal && (
-                          <p className="field-hint" style={{ marginBottom: 0, fontSize: '0.75rem' }}>
-                            ☁ {day.weatherSignal.cloudCover.toFixed(0)}% cloud · 🌧 {day.weatherSignal.rainProbability.toFixed(0)}% rain · ☀ {day.weatherSignal.sunshineHours.toFixed(1)}h sun
-                          </p>
+                          <>
+                            <p className="field-hint" style={{ marginBottom: 0, fontSize: '0.75rem' }}>
+                              ☁ {day.weatherSignal.cloudCover.toFixed(0)}% cloud · 🌧 {day.weatherSignal.rainProbability.toFixed(0)}% rain · ☀ {day.weatherSignal.sunshineHours.toFixed(1)}h sun · 🌅 {formatWeatherClock(day.weatherSignal.sunrise)} · 🌇 {formatWeatherClock(day.weatherSignal.sunset)}
+                            </p>
+                            <p className="field-hint" style={{ marginBottom: 0, fontSize: '0.74rem' }}>
+                              {buildOneLineWeatherReport(day.weatherSignal)}
+                            </p>
+                          </>
                         )}
                       </div>
                     ))}
