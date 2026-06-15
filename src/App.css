@@ -779,9 +779,206 @@ button.danger {
   color: #546e7a;
 }
 
+.rain-window-panel {
+  margin-top: 0.85rem;
+  padding: 0.72rem;
+  border: 1px solid #d2dfe7;
+  border-radius: 11px;
+  background: linear-gradient(180deg, #f9fcfe, #f0f7fb);
+}
+
+.rain-window-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rain-window-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #1d4f67;
+}
+
+.nearby-weather-alert {
+  margin-bottom: 0.55rem;
+  border-radius: 10px;
+  padding: 0.55rem 0.62rem;
+  display: grid;
+  gap: 0.1rem;
+  border: 1px solid #cfdce4;
+  background: #eef6fb;
+}
+
+.nearby-weather-alert strong {
+  color: #1b4d66;
+  font-size: 0.86rem;
+}
+
+.nearby-weather-alert span {
+  color: #35586b;
+  font-size: 0.8rem;
+}
+
+.nearby-weather-alert.rain {
+  border-color: #bcd9e8;
+  background: #e8f4fb;
+}
+
+.nearby-weather-alert.storm {
+  border-color: #f1c5a8;
+  background: #fff1e6;
+}
+
+.nearby-weather-alert.storm strong {
+  color: #89411c;
+}
+
+.nearby-weather-alert.storm span {
+  color: #7a4a30;
+}
+
+.rain-window-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.55rem;
+}
+
+.rain-check-prompt {
+  margin-top: 0.45rem;
+  margin-bottom: 0.25rem;
+  border: 1px solid #c6dae5;
+  background: #edf6fb;
+  border-radius: 10px;
+  padding: 0.5rem 0.6rem;
+  display: grid;
+  gap: 0.28rem;
+}
+
+.rain-check-prompt strong {
+  color: #224f65;
+  font-size: 0.84rem;
+}
+
+.rain-window-item {
+  border: 1px solid #d2e2ea;
+  border-radius: 9px;
+  padding: 0.55rem 0.62rem;
+  background: #ffffff;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.rain-window-item strong {
+  color: #1e4b5f;
+  font-size: 0.88rem;
+}
+
+.rain-time-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.rain-time-chip {
+  font-size: 0.74rem;
+  color: #29586e;
+  background: #e8f4fb;
+  border: 1px solid #c1ddeb;
+  border-radius: 999px;
+  padding: 0.2rem 0.45rem;
+}
+
+.rain-feedback-actions {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rain-feedback-actions .ghost {
+  margin: 0;
+  padding: 0.28rem 0.5rem;
+  font-size: 0.74rem;
+}
+
+.rain-feedback-actions .ghost.is-selected {
+  border-color: #2f7fa2;
+  background: #e5f4fc;
+  color: #20546d;
+}
+
+.rain-feedback-actions .ghost.danger {
+  border-color: #ddc3ba;
+  color: #8f3827;
+}
+
+.rain-feedback-actions .ghost.danger.is-selected {
+  border-color: #c55a44;
+  background: #ffe3db;
+  color: #8f3827;
+}
+
+.rain-window-metrics {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.rain-window-metrics span {
+  font-size: 0.73rem;
+  color: #4f6a77;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  background: #f3f8fb;
+  border: 1px solid #d9e4ea;
+}
+
+.rain-window-metrics .rain-confidence {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.rain-window-metrics .rain-risk-tag {
+  color: #69480f;
+  background: #ffeec8;
+  border-color: #f0d79f;
+  font-weight: 600;
+}
+
+.rain-window-metrics .rain-risk-tag.danger {
+  color: #8a2d19;
+  background: #ffdcd3;
+  border-color: #f2b7a9;
+}
+
+.rain-window-metrics .rain-confidence.high {
+  color: #0f5d44;
+  background: #dcf6ea;
+  border-color: #b8e8d2;
+}
+
+.rain-window-metrics .rain-confidence.medium {
+  color: #7a5511;
+  background: #fff2d8;
+  border-color: #f4ddb1;
+}
+
+.rain-window-metrics .rain-confidence.low {
+  color: #4d5d67;
+  background: #edf3f7;
+  border-color: #d7e1e8;
+}
+
 @media (max-width: 640px) {
   .weather-week-grid {
     grid-template-columns: repeat(4, 1fr);
+  }
+
+  .rain-window-item {
+    padding: 0.5rem 0.52rem;
   }
 }
 
@@ -887,6 +1084,41 @@ button.danger {
 
 .chart-wrap {
   margin-top: 0.8rem;
+}
+
+.solar-daily-chart {
+  height: 260px;
+}
+
+.solar-daily-table-wrap {
+  margin-top: 0.9rem;
+}
+
+.solar-history-filter-row {
+  margin-top: 0.9rem;
+}
+
+.solar-history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+.solar-history-card {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.solar-history-card h3 {
+  margin: 0;
+  color: #21485b;
+}
+
+@media (max-width: 900px) {
+  .solar-history-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .table-card h2 {
