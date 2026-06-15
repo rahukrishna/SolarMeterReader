@@ -157,6 +157,13 @@ type SolarDailySummary = {
   updatedAt: string
 }
 
+type SolarDailyProductionRow = {
+  date: string
+  total: number
+  source: 'manual-eod' | 'manual-reading' | 'meter-derived'
+  note?: string
+}
+
 type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
 type AppTab = 'home' | 'analytics' | 'history' | 'cloud' | 'manage'
 
@@ -178,6 +185,7 @@ const FORECAST_AUDIT_KEY = 'solar-meter-forecast-audit-v1'
 const SOLAR_USAGE_LOG_KEY = 'solar-meter-solar-usage-log-v1'
 const SOLAR_DAILY_SUMMARY_KEY = 'solar-meter-solar-daily-summary-v1'
 const FIRST_LAUNCH_AUTH_KEY = 'solar-meter-first-launch-auth-v1'
+const RAIN_FEEDBACK_KEY = 'solar-meter-rain-feedback-v1'
 const DATA_VERSION = 3
 
 const seededReadings: Reading[] = [
@@ -230,6 +238,64 @@ const seededReadings: Reading[] = [
     note: 'Yesterday reading',
   },
 ]
+
+const LEGACY_SEED_IDS = new Set(['seed-1', 'seed-2', 'seed-3'])
+
+const isLegacySeedReading = (reading: Reading) =>
+  LEGACY_SEED_IDS.has(reading.id) ||
+  seededReadings.some(
+    (seed) =>
+      reading.date === seed.date &&
+      reading.importT1 === seed.importT1 &&
+      reading.importT2 === seed.importT2 &&
+      reading.importT3 === seed.importT3 &&
+      reading.exportT1 === seed.exportT1 &&
+      reading.exportT2 === seed.exportT2 &&
+      reading.exportT3 === seed.exportT3 &&
+      reading.solarGenerated === seed.solarGenerated,
+  ) ||
+  (reading.date === '2026-05-26' &&
+    reading.importT1 === 1 &&
+    reading.importT2 === 0 &&
+    reading.importT3 === 0 &&
+    reading.exportT1 === 1 &&
+    reading.exportT2 === 0 &&
+    reading.exportT3 === 0 &&
+    reading.solarGenerated === 0) ||
+  (reading.date === '2026-06-02' &&
+    reading.importT1 === 28 &&
+    reading.importT2 === 10 &&
+    reading.importT3 === 25 &&
+    reading.exportT1 === 71 &&
+    reading.exportT2 === 0 &&
+    reading.exportT3 === 0 &&
+    reading.solarGenerated === 103) ||
+  (reading.date === '2026-06-07' &&
+    reading.importT1 === 49 &&
+    reading.importT2 === 15 &&
+    reading.importT3 === 31 &&
+    reading.exportT1 === 90 &&
+    reading.exportT2 === 0 &&
+    reading.exportT3 === 0 &&
+    reading.solarGenerated === 136) ||
+  // Older demo payloads before correction pass.
+  (reading.date === '2026-06-02' &&
+    reading.importT1 === 63 &&
+    reading.importT2 === 0 &&
+    reading.importT3 === 0 &&
+    reading.exportT1 === 71 &&
+    reading.exportT2 === 0 &&
+    reading.exportT3 === 0) ||
+  (reading.date === '2026-06-07' &&
+    reading.importT1 === 1 &&
+    reading.importT2 === 0 &&
+    reading.importT3 === 0 &&
+    reading.exportT1 === 1 &&
+    reading.exportT2 === 0 &&
+    reading.exportT3 === 0)
+
+const stripLegacySeedReadings = (items: Reading[]) =>
+  items.filter((reading) => !isLegacySeedReading(reading))
 
 const presetLabels: Record<RangePreset, string> = {
   '2D': '2 Days',
@@ -804,6 +870,61 @@ type WeatherDaySignal = {
   sunset?: string
 }
 
+type RainWindowConfidence = 'low' | 'medium' | 'high'
+
+type RainWindow = {
+  id: string
+  start: string
+  end: string
+  peakProbability: number
+  averageProbability: number
+  expectedRainMm: number
+  peakRainMmPerHour: number
+  confidence: RainWindowConfidence
+  thunderRisk: boolean
+  lightningRisk: boolean
+  likelyTimes: Array<{
+    time: string
+    probability: number
+    mmPerHour: number
+    thunderRisk: boolean
+    lightningRisk: boolean
+  }>
+}
+
+type NearbyWeatherAlert = {
+  id: string
+  level: 'rain' | 'storm'
+  title: string
+  message: string
+  windowId: string
+  windowStart: string
+  windowEnd: string
+  targetTime: string
+}
+
+type RainVerificationPrompt = {
+  id: string
+  windowId: string
+  windowStart: string
+  windowEnd: string
+  targetTime: string
+  createdAt: string
+}
+type RainPredictionFeedback = {
+  windowId: string
+  start: string
+  end: string
+  feedback: 'correct' | 'incorrect'
+  notedAt: string
+}
+
+type RainModelTuning = {
+  probabilityOffset: number
+  intensityOffset: number
+  mode: 'neutral' | 'strict' | 'follow'
+}
+
 type OpenMeteoDailyResponse = {
   time: string[]
   cloud_cover_mean?: number[]
@@ -817,8 +938,19 @@ type OpenMeteoDailyResponse = {
   sunset?: string[]
 }
 
+type OpenMeteoHourlyResponse = {
+  time: string[]
+  precipitation_probability?: number[]
+  precipitation?: number[]
+  rain?: number[]
+  showers?: number[]
+  weather_code?: number[]
+  cape?: number[]
+}
+
 type OpenMeteoResponse = {
   daily?: OpenMeteoDailyResponse
+  hourly?: OpenMeteoHourlyResponse
 }
 
 const formatWeatherClock = (value?: string) => {
@@ -869,6 +1001,346 @@ const buildOneLineWeatherReport = (signal?: WeatherDaySignal) => {
       : 'light to moderate wind is expected'
 
   return `${skyText}${tempText}. ${sunWindowText}. ${windText}. Rain chance ${signal.rainProbability.toFixed(0)}%.`
+}
+
+const getRainWindowConfidence = (
+  peakProbability: number,
+  peakRainMmPerHour: number,
+  durationHours: number,
+): RainWindowConfidence => {
+  if (peakProbability >= 70 && peakRainMmPerHour >= 0.7 && durationHours >= 2) {
+    return 'high'
+  }
+
+  if (peakProbability >= 50 || peakRainMmPerHour >= 0.35) {
+    return 'medium'
+  }
+
+  return 'low'
+}
+
+const isThunderWeatherCode = (code: number) => code === 95 || code === 96 || code === 99
+
+const buildRainWindowsFromHourly = (
+  hourly?: OpenMeteoHourlyResponse,
+  tuning: RainModelTuning = {
+    probabilityOffset: 0,
+    intensityOffset: 0,
+    mode: 'neutral',
+  },
+) => {
+  if (!hourly?.time?.length) {
+    return [] as RainWindow[]
+  }
+
+  const horizonStart = dayjs().startOf('hour')
+  const horizonEnd = horizonStart.add(48, 'hour')
+  const probabilityTrigger = clamp(45 + tuning.probabilityOffset, 30, 75)
+  const moderateProbabilityTrigger = clamp(35 + tuning.probabilityOffset, 20, 70)
+  const weakProbabilityTrigger = clamp(25 + tuning.probabilityOffset, 15, 65)
+  const moderateIntensityTrigger = clamp(0.2 + tuning.intensityOffset, 0.1, 0.8)
+  const highIntensityTrigger = clamp(0.6 + tuning.intensityOffset, 0.2, 1.4)
+
+  const points = hourly.time
+    .map((timestamp, index) => {
+      const at = dayjs(timestamp)
+      if (!at.isValid() || at.isBefore(horizonStart) || at.isAfter(horizonEnd)) {
+        return null
+      }
+
+      const probability = clamp(Number(hourly.precipitation_probability?.[index] ?? 0), 0, 100)
+      const precipitation = Math.max(0, Number(hourly.precipitation?.[index] ?? 0))
+      const rain = Math.max(0, Number(hourly.rain?.[index] ?? 0))
+      const showers = Math.max(0, Number(hourly.showers?.[index] ?? 0))
+      const weatherCode = Math.round(Number(hourly.weather_code?.[index] ?? -1))
+      const cape = Math.max(0, Number(hourly.cape?.[index] ?? 0))
+      const mmPerHour = Math.max(precipitation, rain + showers)
+      const thunderRisk =
+        isThunderWeatherCode(weatherCode) ||
+        (cape >= 700 && (mmPerHour >= 0.3 || probability >= 45))
+      const lightningRisk = isThunderWeatherCode(weatherCode) || cape >= 1200
+      const likelyRain =
+        thunderRisk ||
+        probability >= probabilityTrigger ||
+        (probability >= moderateProbabilityTrigger && mmPerHour >= moderateIntensityTrigger) ||
+        (probability >= weakProbabilityTrigger && mmPerHour >= highIntensityTrigger)
+
+      return {
+        at,
+        probability,
+        mmPerHour,
+        likelyRain,
+        thunderRisk,
+        lightningRisk,
+      }
+    })
+    .filter((point): point is {
+      at: dayjs.Dayjs
+      probability: number
+      mmPerHour: number
+      likelyRain: boolean
+      thunderRisk: boolean
+      lightningRisk: boolean
+    } =>
+      point != null,
+    )
+
+  if (!points.length) {
+    return [] as RainWindow[]
+  }
+
+  const windows: RainWindow[] = []
+  let current: {
+    start: dayjs.Dayjs
+    end: dayjs.Dayjs
+    probabilities: number[]
+    mmPerHourValues: number[]
+    thunderRisk: boolean
+    lightningRisk: boolean
+    slots: Array<{
+      time: string
+      probability: number
+      mmPerHour: number
+      thunderRisk: boolean
+      lightningRisk: boolean
+    }>
+  } | null = null
+
+  const finalizeCurrent = () => {
+    if (!current) {
+      return
+    }
+
+    const durationHours = Math.max(1, current.end.diff(current.start, 'hour'))
+    const peakProbability = Math.max(...current.probabilities)
+    const averageProbability = average(current.probabilities)
+    const expectedRainMm = current.mmPerHourValues.reduce((sum, value) => sum + value, 0)
+    const peakRainMmPerHour = Math.max(...current.mmPerHourValues)
+    const confidence = getRainWindowConfidence(
+      peakProbability,
+      peakRainMmPerHour,
+      durationHours,
+    )
+
+    const likelyTimes = [...current.slots]
+      .sort((a, b) => {
+        const scoreA = a.probability * 0.75 + Math.min(a.mmPerHour * 25, 25)
+        const scoreB = b.probability * 0.75 + Math.min(b.mmPerHour * 25, 25)
+        return scoreB - scoreA
+      })
+      .slice(0, 4)
+      .sort((a, b) => dayjs(a.time).valueOf() - dayjs(b.time).valueOf())
+
+    windows.push({
+      id: `${current.start.toISOString()}_${current.end.toISOString()}`,
+      start: current.start.toISOString(),
+      end: current.end.toISOString(),
+      peakProbability,
+      averageProbability,
+      expectedRainMm,
+      peakRainMmPerHour,
+      confidence,
+      thunderRisk: current.thunderRisk,
+      lightningRisk: current.lightningRisk,
+      likelyTimes,
+    })
+  }
+
+  for (const point of points) {
+    if (!point.likelyRain) {
+      finalizeCurrent()
+      current = null
+      continue
+    }
+
+    if (!current) {
+      current = {
+        start: point.at,
+        end: point.at.add(1, 'hour'),
+        probabilities: [point.probability],
+        mmPerHourValues: [point.mmPerHour],
+        thunderRisk: point.thunderRisk,
+        lightningRisk: point.lightningRisk,
+        slots: [
+          {
+            time: point.at.toISOString(),
+            probability: point.probability,
+            mmPerHour: point.mmPerHour,
+            thunderRisk: point.thunderRisk,
+            lightningRisk: point.lightningRisk,
+          },
+        ],
+      }
+      continue
+    }
+
+    const gapHours = point.at.diff(current.end, 'minute') / 60
+    if (gapHours > 1) {
+      finalizeCurrent()
+      current = {
+        start: point.at,
+        end: point.at.add(1, 'hour'),
+        probabilities: [point.probability],
+        mmPerHourValues: [point.mmPerHour],
+        thunderRisk: point.thunderRisk,
+        lightningRisk: point.lightningRisk,
+        slots: [
+          {
+            time: point.at.toISOString(),
+            probability: point.probability,
+            mmPerHour: point.mmPerHour,
+            thunderRisk: point.thunderRisk,
+            lightningRisk: point.lightningRisk,
+          },
+        ],
+      }
+      continue
+    }
+
+    current.end = point.at.add(1, 'hour')
+    current.probabilities.push(point.probability)
+    current.mmPerHourValues.push(point.mmPerHour)
+    current.thunderRisk = current.thunderRisk || point.thunderRisk
+    current.lightningRisk = current.lightningRisk || point.lightningRisk
+    current.slots.push({
+      time: point.at.toISOString(),
+      probability: point.probability,
+      mmPerHour: point.mmPerHour,
+      thunderRisk: point.thunderRisk,
+      lightningRisk: point.lightningRisk,
+    })
+  }
+
+  finalizeCurrent()
+
+  return windows
+    .filter((window) => window.peakProbability >= 35 || window.expectedRainMm >= 0.3)
+    .sort((a, b) => dayjs(a.start).valueOf() - dayjs(b.start).valueOf())
+    .slice(0, 6)
+}
+
+const formatRainWindowRange = (startIso: string, endIso: string) => {
+  const start = dayjs(startIso)
+  const end = dayjs(endIso)
+
+  if (!start.isValid() || !end.isValid()) {
+    return '--'
+  }
+
+  const dayLabel = start.isSame(dayjs(), 'day')
+    ? 'Today'
+    : start.isSame(dayjs().add(1, 'day'), 'day')
+      ? 'Tomorrow'
+      : start.format('ddd, DD MMM')
+
+  const sameDay = start.isSame(end, 'day')
+  return sameDay
+    ? `${dayLabel}, ${start.format('HH:mm')} - ${end.format('HH:mm')}`
+    : `${dayLabel}, ${start.format('HH:mm')} - ${end.format('ddd HH:mm')}`
+}
+
+const buildNearbyWeatherAlert = (windows: RainWindow[]): NearbyWeatherAlert | null => {
+  if (!windows.length) {
+    return null
+  }
+
+  const now = dayjs()
+  const ranked = [...windows].sort((a, b) => dayjs(a.start).valueOf() - dayjs(b.start).valueOf())
+
+  const active = ranked.find((window) => {
+    const start = dayjs(window.start)
+    const end = dayjs(window.end)
+    return (now.isAfter(start) || now.isSame(start)) && now.isBefore(end)
+  })
+
+  if (active) {
+    const targetSlot =
+      active.likelyTimes.find((slot) => {
+        const slotTime = dayjs(slot.time)
+        return now.isSame(slotTime) || now.isBefore(slotTime)
+      }) ?? active.likelyTimes[0]
+    const targetTime = targetSlot?.time ?? active.start
+    const severe = active.thunderRisk || active.lightningRisk
+    return {
+      id: `${active.id}_${targetTime}_active`,
+      level: severe ? 'storm' : 'rain',
+      title: severe ? 'Storm risk right now' : 'Rain likely right now',
+      message: severe
+        ? `Thunder or lightning risk around ${dayjs(targetTime).format('HH:mm')} (peak rain chance ${active.peakProbability.toFixed(0)}%).`
+        : `Rain is likely around ${dayjs(targetTime).format('HH:mm')} (peak chance ${active.peakProbability.toFixed(0)}%).`,
+      windowId: active.id,
+      windowStart: active.start,
+      windowEnd: active.end,
+      targetTime,
+    }
+  }
+
+  const next3h = ranked.find((window) => {
+    const start = dayjs(window.start)
+    const minutesAway = start.diff(now, 'minute')
+    return minutesAway >= 0 && minutesAway <= 180
+  })
+
+  if (!next3h) {
+    return null
+  }
+
+  const severe = next3h.thunderRisk || next3h.lightningRisk
+  const nextSlot =
+    next3h.likelyTimes.find((slot) => dayjs(slot.time).diff(now, 'minute') >= 0) ??
+    next3h.likelyTimes[0]
+  const targetTime = nextSlot?.time ?? next3h.start
+  const minutesAway = Math.max(0, dayjs(targetTime).diff(now, 'minute'))
+  const startLabel = dayjs(targetTime).format('HH:mm')
+
+  return {
+    id: `${next3h.id}_${targetTime}_soon`,
+    level: severe ? 'storm' : 'rain',
+    title: severe ? 'Storm risk nearby' : 'Rain likely soon',
+    message: severe
+      ? `Thunder or lightning risk may start around ${startLabel} (${minutesAway} min).`
+      : `Rain may start around ${startLabel} (${minutesAway} min), peak chance ${next3h.peakProbability.toFixed(0)}%.`,
+    windowId: next3h.id,
+    windowStart: next3h.start,
+    windowEnd: next3h.end,
+    targetTime,
+  }
+}
+
+const deriveRainModelTuning = (feedbacks: RainPredictionFeedback[]): RainModelTuning => {
+  const recent = feedbacks.slice(0, 20)
+  if (recent.length < 4) {
+    return { probabilityOffset: 0, intensityOffset: 0, mode: 'neutral' }
+  }
+
+  const correctCount = recent.filter((entry) => entry.feedback === 'correct').length
+  const incorrectCount = recent.length - correctCount
+  const accuracy = correctCount / recent.length
+  const recentStreak = recent.slice(0, 3)
+  const incorrectStreak =
+    recentStreak.length === 3 && recentStreak.every((entry) => entry.feedback === 'incorrect')
+
+  if (accuracy < 0.5 || incorrectStreak) {
+    return {
+      probabilityOffset: incorrectStreak ? 10 : 8,
+      intensityOffset: incorrectStreak ? 0.18 : 0.12,
+      mode: 'strict',
+    }
+  }
+
+  if (accuracy < 0.65) {
+    return { probabilityOffset: 4, intensityOffset: 0.06, mode: 'strict' }
+  }
+
+  if (accuracy > 0.85 && correctCount >= incorrectCount * 2) {
+    return { probabilityOffset: -4, intensityOffset: -0.05, mode: 'follow' }
+  }
+
+  if (accuracy > 0.72) {
+    return { probabilityOffset: -2, intensityOffset: -0.02, mode: 'follow' }
+  }
+
+  return { probabilityOffset: 0, intensityOffset: 0, mode: 'neutral' }
 }
 
 const getWeatherAdjustedMultipliers = (
@@ -1279,6 +1751,8 @@ function App() {
   const [cloudBusy, setCloudBusy] = useState(false)
   const [cloudMessage, setCloudMessage] = useState('')
   const [selectedBillingCycleKey, setSelectedBillingCycleKey] = useState<string | null>(null)
+  const [solarHistoryMonthFilter, setSolarHistoryMonthFilter] = useState('')
+  const [solarHistoryYearFilter, setSolarHistoryYearFilter] = useState('')
   const [editingReadingId, setEditingReadingId] = useState<string | null>(null)
   const [lastDeletedReading, setLastDeletedReading] = useState<Reading | null>(null)
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([])
@@ -1300,6 +1774,13 @@ function App() {
   const [billImportBusy, setBillImportBusy] = useState(false)
   const [billImportMessage, setBillImportMessage] = useState('')
   const [weatherSignals, setWeatherSignals] = useState<Record<string, WeatherDaySignal>>({})
+  const [rainWindows, setRainWindows] = useState<RainWindow[]>([])
+  const [rainPredictionFeedbacks, setRainPredictionFeedbacks] = useState<RainPredictionFeedback[]>([])
+  const [rainForecastUpdatedAt, setRainForecastUpdatedAt] = useState('')
+  const [nearbyWeatherAlert, setNearbyWeatherAlert] = useState<NearbyWeatherAlert | null>(null)
+  const [rainVerificationPrompt, setRainVerificationPrompt] =
+    useState<RainVerificationPrompt | null>(null)
+  const [lastWeatherNotificationKey, setLastWeatherNotificationKey] = useState('')
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus>('idle')
   const [weatherMessage, setWeatherMessage] = useState('')
   const [dailyForecastSnapshots, setDailyForecastSnapshots] = useState<
@@ -1321,6 +1802,36 @@ function App() {
   const [firstLaunchAuthBusy, setFirstLaunchAuthBusy] = useState(false)
   const [firstLaunchAuthError, setFirstLaunchAuthError] = useState('')
 
+  const rainModelTuning = useMemo(
+    () => deriveRainModelTuning(rainPredictionFeedbacks),
+    [rainPredictionFeedbacks],
+  )
+
+  const rainFeedbackByWindowId = useMemo(
+    () => new Map(rainPredictionFeedbacks.map((entry) => [entry.windowId, entry.feedback])),
+    [rainPredictionFeedbacks],
+  )
+
+  const rainPredictionAccuracy = useMemo(() => {
+    if (!rainPredictionFeedbacks.length) {
+      return {
+        sampleSize: 0,
+        correctCount: 0,
+        accuracyPct: 0,
+      }
+    }
+
+    const recent = rainPredictionFeedbacks.slice(0, 30)
+    const correctCount = recent.filter((entry) => entry.feedback === 'correct').length
+    const accuracyPct = (correctCount / recent.length) * 100
+
+    return {
+      sampleSize: recent.length,
+      correctCount,
+      accuracyPct,
+    }
+  }, [rainPredictionFeedbacks])
+
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
     const rawSettings = localStorage.getItem(SETTINGS_KEY)
@@ -1332,7 +1843,8 @@ function App() {
 
     if (rawReadings) {
       const parsed = JSON.parse(rawReadings) as Reading[]
-      let normalized = parsed.length ? sortReadings(parsed) : sortReadings(seededReadings)
+      const withoutLegacySeeds = stripLegacySeedReadings(parsed)
+      let normalized = withoutLegacySeeds.length ? sortReadings(withoutLegacySeeds) : []
       const corrected = applyKnownCorrections(normalized)
       const idNormalized = normalizeReadingIds(corrected)
 
@@ -1350,7 +1862,7 @@ function App() {
 
       setReadings(normalized)
     } else {
-      setReadings(sortReadings(seededReadings))
+      setReadings([])
       localStorage.setItem(DATA_VERSION_KEY, String(DATA_VERSION))
     }
 
@@ -1401,6 +1913,12 @@ function App() {
       setSolarDailySummaries(parsed.slice(0, 120))
     }
 
+    const rawRainFeedback = localStorage.getItem(RAIN_FEEDBACK_KEY)
+    if (rawRainFeedback) {
+      const parsed = JSON.parse(rawRainFeedback) as RainPredictionFeedback[]
+      setRainPredictionFeedbacks(parsed.slice(0, 120))
+    }
+
     setIsHydrated(true)
   }, [])
 
@@ -1436,6 +1954,16 @@ function App() {
   }, [solarDailySummaries, isHydrated])
 
   useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    localStorage.setItem(
+      RAIN_FEEDBACK_KEY,
+      JSON.stringify(rainPredictionFeedbacks.slice(0, 120)),
+    )
+  }, [rainPredictionFeedbacks, isHydrated])
+
+  useEffect(() => {
     if (!isCloudEnabled || !supabase) {
       return
     }
@@ -1468,8 +1996,13 @@ function App() {
 
   useEffect(() => {
     let isCancelled = false
+    let isRefreshing = false
 
     const loadWeatherForecast = async () => {
+      if (isRefreshing) {
+        return
+      }
+      isRefreshing = true
       setWeatherStatus('loading')
 
       try {
@@ -1483,6 +2016,7 @@ function App() {
           end_date: forecastEnd,
           daily:
             'cloud_cover_mean,precipitation_probability_max,sunshine_duration,shortwave_radiation_sum,wind_speed_10m_max,temperature_2m_max,temperature_2m_min,sunrise,sunset',
+          hourly: 'precipitation_probability,precipitation,rain,showers,weather_code,cape',
         })
 
         const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`)
@@ -1492,6 +2026,7 @@ function App() {
 
         const payload = (await response.json()) as OpenMeteoResponse
         const daily = payload.daily
+        const windows = buildRainWindowsFromHourly(payload.hourly, rainModelTuning)
 
         if (!daily?.time?.length) {
           throw new Error('Weather service returned empty daily forecast')
@@ -1519,13 +2054,17 @@ function App() {
 
         if (!isCancelled) {
           setWeatherSignals(nextSignals)
+          setRainWindows(windows)
+          setRainForecastUpdatedAt(dayjs().toISOString())
           setWeatherStatus('ready')
           setWeatherMessage(
-            `Live weather synced for ${Object.keys(nextSignals).length} days (Irimbiliyam).`,
+            `Live weather synced for ${Object.keys(nextSignals).length} days with hourly rain timing (${windows.length} windows, ${rainModelTuning.mode} mode).`,
           )
         }
       } catch (error) {
         if (!isCancelled) {
+          setRainWindows([])
+          setRainForecastUpdatedAt('')
           setWeatherStatus('error')
           setWeatherMessage(
             error instanceof Error
@@ -1533,15 +2072,31 @@ function App() {
               : 'Weather sync failed. Using seasonal fallback model.',
           )
         }
+      } finally {
+        isRefreshing = false
       }
     }
 
     void loadWeatherForecast()
 
+    const refreshTimer = window.setInterval(() => {
+      void loadWeatherForecast()
+    }, 20 * 60 * 1000)
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void loadWeatherForecast()
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
     return () => {
       isCancelled = true
+      window.clearInterval(refreshTimer)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [])
+  }, [rainModelTuning])
 
   useEffect(() => {
     if (!isHydrated) {
@@ -1612,8 +2167,93 @@ function App() {
     }
   }, [appToast])
 
+  useEffect(() => {
+    setNearbyWeatherAlert(buildNearbyWeatherAlert(rainWindows))
+  }, [rainWindows])
+
+  useEffect(() => {
+    if (!nearbyWeatherAlert) {
+      return
+    }
+
+    const notificationKey = `${nearbyWeatherAlert.id}_${nearbyWeatherAlert.level}`
+    if (lastWeatherNotificationKey === notificationKey) {
+      return
+    }
+
+    setLastWeatherNotificationKey(notificationKey)
+    setAppToast(`${nearbyWeatherAlert.title}: ${nearbyWeatherAlert.message}`)
+
+    if (!rainFeedbackByWindowId.has(nearbyWeatherAlert.windowId)) {
+      setRainVerificationPrompt({
+        id: notificationKey,
+        windowId: nearbyWeatherAlert.windowId,
+        windowStart: nearbyWeatherAlert.windowStart,
+        windowEnd: nearbyWeatherAlert.windowEnd,
+        targetTime: nearbyWeatherAlert.targetTime,
+        createdAt: new Date().toISOString(),
+      })
+    }
+
+    if (typeof Notification === 'undefined') {
+      return
+    }
+
+    const sendNotification = () => {
+      try {
+        void new Notification(nearbyWeatherAlert.title, {
+          body: nearbyWeatherAlert.message,
+          tag: notificationKey,
+        })
+      } catch {
+        // Ignore notification failures on unsupported environments.
+      }
+    }
+
+    if (Notification.permission === 'granted') {
+      sendNotification()
+      return
+    }
+
+    if (Notification.permission === 'default') {
+      void Notification.requestPermission().then((permission) => {
+        if (permission === 'granted') {
+          sendNotification()
+        }
+      })
+    }
+  }, [nearbyWeatherAlert, lastWeatherNotificationKey, rainFeedbackByWindowId])
+
+  useEffect(() => {
+    if (!rainVerificationPrompt) {
+      return
+    }
+
+    if (rainFeedbackByWindowId.has(rainVerificationPrompt.windowId)) {
+      return
+    }
+
+    const target = dayjs(rainVerificationPrompt.targetTime)
+    const promptText = `Did it rain at ${target.format('HH:mm')}? Please mark Yes or No in Expected Rain Timing.`
+    const delay = target.diff(dayjs(), 'millisecond')
+
+    if (delay <= 0) {
+      setAppToast(promptText)
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setAppToast(promptText)
+    }, delay)
+
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [rainVerificationPrompt, rainFeedbackByWindowId])
+
   const sortedReadings = useMemo(() => sortReadings(readings), [readings])
   const derivedReadings = useMemo(() => deriveReadings(sortedReadings), [sortedReadings])
+  const dailySeries = useMemo(() => buildDailyUsageSeries(derivedReadings), [derivedReadings])
   const normalizedDailySeries = useMemo(
     () => buildNormalizedDailyUsageSeries(derivedReadings),
     [derivedReadings],
@@ -2326,6 +2966,131 @@ function App() {
     [solarDailySummaries, todayDateKey],
   )
 
+  const solarDailyProductionRows = useMemo(() => {
+    const rows = new Map<string, SolarDailyProductionRow>()
+
+    for (const entry of dailySeries) {
+      rows.set(entry.date, {
+        date: entry.date,
+        total: Math.max(0, entry.solar),
+        source: 'meter-derived',
+      })
+    }
+
+    for (const log of solarUsageLogs) {
+      const date = dayjs(log.timestamp).format('YYYY-MM-DD')
+      const existing = rows.get(date)
+      const nextTotal = Math.max(0, log.value)
+
+      if (!existing || existing.source === 'meter-derived') {
+        rows.set(date, {
+          date,
+          total: nextTotal,
+          source: 'manual-reading',
+          note: log.note,
+        })
+      }
+    }
+
+    for (const summary of solarDailySummaries) {
+      rows.set(summary.date, {
+        date: summary.date,
+        total: summary.total,
+        source: 'manual-eod',
+        note: summary.note,
+      })
+    }
+
+    return [...rows.values()].sort((a, b) => a.date.localeCompare(b.date))
+  }, [dailySeries, solarDailySummaries, solarUsageLogs])
+
+  const solarExportDailyRows = useMemo(
+    () =>
+      dailySeries.map((entry) => ({
+        date: entry.date,
+        total: Math.max(0, entry.export),
+      })),
+    [dailySeries],
+  )
+
+  const solarHistoryYearOptions = useMemo(() => {
+    const years = new Set<string>()
+    for (const row of solarDailyProductionRows) {
+      years.add(dayjs(row.date).format('YYYY'))
+    }
+    for (const row of solarExportDailyRows) {
+      years.add(dayjs(row.date).format('YYYY'))
+    }
+    return [...years].sort((a, b) => Number(b) - Number(a))
+  }, [solarDailyProductionRows, solarExportDailyRows])
+
+  const filteredSolarProductionRows = useMemo(
+    () =>
+      solarDailyProductionRows.filter((row) => {
+        const date = dayjs(row.date)
+        return (
+          (!solarHistoryMonthFilter || date.format('MM') === solarHistoryMonthFilter) &&
+          (!solarHistoryYearFilter || date.format('YYYY') === solarHistoryYearFilter)
+        )
+      }),
+    [solarDailyProductionRows, solarHistoryMonthFilter, solarHistoryYearFilter],
+  )
+
+  const filteredSolarExportRows = useMemo(
+    () =>
+      solarExportDailyRows.filter((row) => {
+        const date = dayjs(row.date)
+        return (
+          (!solarHistoryMonthFilter || date.format('MM') === solarHistoryMonthFilter) &&
+          (!solarHistoryYearFilter || date.format('YYYY') === solarHistoryYearFilter)
+        )
+      }),
+    [solarExportDailyRows, solarHistoryMonthFilter, solarHistoryYearFilter],
+  )
+
+  const solarHistoryMonthLabel = solarHistoryMonthFilter
+    ? dayjs(`2000-${solarHistoryMonthFilter}-01`).format('MMMM')
+    : 'All Months'
+
+  const solarHistoryYearLabel = solarHistoryYearFilter || 'All Years'
+
+  const filteredSolarProductionHistoryRows = useMemo(
+    () => [...filteredSolarProductionRows].reverse(),
+    [filteredSolarProductionRows],
+  )
+
+  const filteredSolarExportHistoryRows = useMemo(
+    () => [...filteredSolarExportRows].reverse(),
+    [filteredSolarExportRows],
+  )
+
+  const solarHistoryFilterLabel = `${solarHistoryMonthLabel} / ${solarHistoryYearLabel}`
+
+  const solarHistoryMonthOptions = [
+    { value: '01', label: 'January' },
+    { value: '02', label: 'February' },
+    { value: '03', label: 'March' },
+    { value: '04', label: 'April' },
+    { value: '05', label: 'May' },
+    { value: '06', label: 'June' },
+    { value: '07', label: 'July' },
+    { value: '08', label: 'August' },
+    { value: '09', label: 'September' },
+    { value: '10', label: 'October' },
+    { value: '11', label: 'November' },
+    { value: '12', label: 'December' },
+  ]
+
+  const recentSolarProductionRows = useMemo(
+    () => filteredSolarProductionRows,
+    [filteredSolarProductionRows],
+  )
+
+  const solarProductionHistoryRows = useMemo(
+    () => filteredSolarProductionHistoryRows,
+    [filteredSolarProductionHistoryRows],
+  )
+
   const meterDerivedSolarToday = useMemo(() => {
     const row = normalizedDailySeries.find((entry) => entry.date === todayDateKey)
     return row ? Math.max(0, row.solar) : 0
@@ -2417,6 +3182,32 @@ function App() {
     if (supabase && cloudUser) {
       void pushToCloud(sortedReadings, true, solarUsageLogs, nextSummaries)
     }
+  }
+
+  const markRainWindowFeedback = (
+    window: Pick<RainWindow, 'id' | 'start' | 'end'>,
+    feedback: 'correct' | 'incorrect',
+  ) => {
+    const entry: RainPredictionFeedback = {
+      windowId: window.id,
+      start: window.start,
+      end: window.end,
+      feedback,
+      notedAt: new Date().toISOString(),
+    }
+
+    setRainPredictionFeedbacks((prev) => {
+      const next = [entry, ...prev.filter((item) => item.windowId !== window.id)]
+      return next.slice(0, 120)
+    })
+
+    setRainVerificationPrompt((prev) => (prev?.windowId === window.id ? null : prev))
+
+    setAppToast(
+      feedback === 'correct'
+        ? 'Rain prediction marked correct. Model will follow this pattern.'
+        : 'Rain prediction marked incorrect. Model will tighten similar future alerts.',
+    )
   }
 
   const anomalies = useMemo(() => {
@@ -3251,16 +4042,18 @@ function App() {
       updatedAt: row.updated_at,
     }))
 
+    const sanitizedCloudReadings = sortReadings(
+      stripLegacySeedReadings(applyKnownCorrections(cloudReadings)),
+    )
+
     if (cloudReadings.length > 0 || cloudSolarLogs.length > 0 || cloudSolarSummaries.length > 0) {
-      if (cloudReadings.length > 0) {
-        setReadings(sortReadings(cloudReadings))
-      }
+      setReadings(sanitizedCloudReadings)
       setSolarUsageLogs(cloudSolarLogs)
       setSolarDailySummaries(cloudSolarSummaries)
       setCloudMessage(
         silent
-          ? `Auto-synced cloud data: ${cloudReadings.length} readings, ${cloudSolarLogs.length} solar logs.`
-          : `Cloud download complete: ${cloudReadings.length} readings, ${cloudSolarLogs.length} solar logs, ${cloudSolarSummaries.length} EOD summaries.`,
+          ? `Auto-synced cloud data: ${sanitizedCloudReadings.length} readings, ${cloudSolarLogs.length} solar logs.`
+          : `Cloud download complete: ${sanitizedCloudReadings.length} readings, ${cloudSolarLogs.length} solar logs, ${cloudSolarSummaries.length} EOD summaries.`,
       )
       setSyncStatus('success')
       setLastSyncAt(new Date().toISOString())
@@ -4052,6 +4845,167 @@ function App() {
         )}
       </section>
 
+      <section className="card">
+        <div className="section-head">
+          <h2>Daily Solar History</h2>
+          <p className="field-hint" style={{ margin: 0 }}>
+            Manual solar readings are used first for the total solar view, then meter-derived data.
+          </p>
+        </div>
+
+        <div className="month-select-row solar-history-filter-row">
+          <label className="month-select-label">
+            <span>Month:</span>
+            <select
+              className="month-select-input"
+              value={solarHistoryMonthFilter}
+              onChange={(event) => setSolarHistoryMonthFilter(event.target.value)}
+            >
+              <option value="">All Months</option>
+              {solarHistoryMonthOptions.map((month) => (
+                <option key={month.value} value={month.value}>
+                  {month.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="month-select-label">
+            <span>Year:</span>
+            <select
+              className="month-select-input"
+              value={solarHistoryYearFilter}
+              onChange={(event) => setSolarHistoryYearFilter(event.target.value)}
+            >
+              <option value="">All Years</option>
+              {solarHistoryYearOptions.map((year) => (
+                <option key={year} value={year}>
+                  {year}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <p className="field-hint" style={{ marginTop: '0.5rem' }}>
+          Showing {solarHistoryFilterLabel}. Use this to check yesterday, the day before, or any
+          month/year range you want.
+        </p>
+
+        <div className="solar-history-grid">
+          <article className="tracker-card solar-history-card">
+            <h3>Total Solar Production</h3>
+            {recentSolarProductionRows.length > 0 ? (
+              <>
+                <div className="chart-wrap solar-daily-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart
+                      data={recentSolarProductionRows}
+                      margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="date"
+                        tickFormatter={(value) => dayjs(value).format('DD MMM')}
+                        minTickGap={20}
+                      />
+                      <YAxis tickFormatter={(value) => formatUnits(Number(value))} />
+                      <Tooltip
+                        labelFormatter={(value) => dayjs(String(value)).format('DD MMM YYYY')}
+                        formatter={(value) => [`${Number(value).toFixed(2)} kWh`, 'Solar']}
+                      />
+                      <Bar dataKey="total" fill="#1a8f69" radius={[8, 8, 0, 0]} />
+                      <Line type="monotone" dataKey="total" stroke="#f18f01" strokeWidth={2} dot={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="table-wrap solar-daily-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Total Solar</th>
+                        <th>Source</th>
+                        <th>Note</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {solarProductionHistoryRows.map((row) => (
+                        <tr key={row.date}>
+                          <td>{dayjs(row.date).format('DD MMM YYYY')}</td>
+                          <td>{row.total.toFixed(2)} kWh</td>
+                          <td>
+                            {row.source === 'manual-eod'
+                              ? 'Saved EOD'
+                              : row.source === 'manual-reading'
+                                ? 'Manual reading'
+                                : 'Meter-derived'}
+                          </td>
+                          <td>{row.note ?? '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <p className="empty-state">No daily solar totals available for this filter.</p>
+            )}
+          </article>
+
+          <article className="tracker-card solar-history-card">
+            <h3>Exported Solar Per Day</h3>
+            {filteredSolarExportRows.length > 0 ? (
+              <>
+                <div className="chart-wrap solar-daily-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart
+                      data={filteredSolarExportRows}
+                      margin={{ top: 8, right: 8, left: 0, bottom: 0 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis
+                        dataKey="date"
+                        tickFormatter={(value) => dayjs(value).format('DD MMM')}
+                        minTickGap={20}
+                      />
+                      <YAxis tickFormatter={(value) => formatUnits(Number(value))} />
+                      <Tooltip
+                        labelFormatter={(value) => dayjs(String(value)).format('DD MMM YYYY')}
+                        formatter={(value) => [`${Number(value).toFixed(2)} kWh`, 'Exported Solar']}
+                      />
+                      <Bar dataKey="total" fill="#2f6b74" radius={[8, 8, 0, 0]} />
+                      <Line type="monotone" dataKey="total" stroke="#1a5f80" strokeWidth={2} dot={false} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div className="table-wrap solar-daily-table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Exported Solar</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredSolarExportHistoryRows.map((row) => (
+                        <tr key={row.date}>
+                          <td>{dayjs(row.date).format('DD MMM YYYY')}</td>
+                          <td>{row.total.toFixed(2)} kWh</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : (
+              <p className="empty-state">No exported solar data available for this filter.</p>
+            )}
+          </article>
+        </div>
+      </section>
+
       <section className="card form-card">
         <div className="section-head">
           <h2>Quick Entry</h2>
@@ -4415,6 +5369,163 @@ function App() {
           ) : showWeatherOutlook ? (
             <p className="empty-state">Weather unavailable. Forecasts use seasonal model.</p>
           ) : null}
+
+          {showWeatherOutlook && weatherStatus === 'ready' && (
+            <div className="rain-window-panel" role="region" aria-label="Expected rain timing in next 48 hours">
+              {nearbyWeatherAlert && (
+                <div className={`nearby-weather-alert ${nearbyWeatherAlert.level === 'storm' ? 'storm' : 'rain'}`} role="alert">
+                  <strong>{nearbyWeatherAlert.title}</strong>
+                  <span>{nearbyWeatherAlert.message}</span>
+                </div>
+              )}
+
+              <div className="rain-window-head">
+                <h3>Expected Rain Timing (Next 48 Hours)</h3>
+                {rainForecastUpdatedAt && (
+                  <span className="field-hint" style={{ margin: 0 }}>
+                    Updated {dayjs(rainForecastUpdatedAt).format('DD MMM HH:mm')}
+                  </span>
+                )}
+              </div>
+
+              <p className="field-hint" style={{ marginTop: '0.4rem' }}>
+                Prediction learning: {rainModelTuning.mode.toUpperCase()} mode |
+                {' '}Accuracy {rainPredictionAccuracy.accuracyPct.toFixed(0)}%
+                {' '}({rainPredictionAccuracy.correctCount}/{rainPredictionAccuracy.sampleSize || 0})
+              </p>
+
+              {rainVerificationPrompt &&
+                !rainFeedbackByWindowId.has(rainVerificationPrompt.windowId) && (
+                  <div className="rain-check-prompt" role="status">
+                    <strong>
+                      {dayjs().isBefore(dayjs(rainVerificationPrompt.targetTime))
+                        ? `Rain verification scheduled for ${dayjs(rainVerificationPrompt.targetTime).format('HH:mm')}`
+                        : `Did it rain at ${dayjs(rainVerificationPrompt.targetTime).format('HH:mm')}?`}
+                    </strong>
+                    <p className="field-hint" style={{ marginBottom: 0 }}>
+                      {dayjs().isBefore(dayjs(rainVerificationPrompt.targetTime))
+                        ? 'You will be asked to confirm this exact predicted time once it passes.'
+                        : 'Confirming this helps the model learn and improve upcoming rain timing.'}
+                    </p>
+                    {!dayjs().isBefore(dayjs(rainVerificationPrompt.targetTime)) && (
+                      <div className="rain-feedback-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() =>
+                            markRainWindowFeedback(
+                              {
+                                id: rainVerificationPrompt.windowId,
+                                start: rainVerificationPrompt.windowStart,
+                                end: rainVerificationPrompt.windowEnd,
+                              },
+                              'correct',
+                            )
+                          }
+                        >
+                          Yes, it rained
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost danger"
+                          onClick={() =>
+                            markRainWindowFeedback(
+                              {
+                                id: rainVerificationPrompt.windowId,
+                                start: rainVerificationPrompt.windowStart,
+                                end: rainVerificationPrompt.windowEnd,
+                              },
+                              'incorrect',
+                            )
+                          }
+                        >
+                          No, it did not
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              {rainWindows.length > 0 ? (
+                <div className="rain-window-list">
+                  {rainWindows.map((window) => (
+                    <article key={window.id} className="rain-window-item">
+                      <div>
+                        <strong>
+                          Likely at{' '}
+                          {window.likelyTimes.length > 0
+                            ? window.likelyTimes
+                                .map((slot) => dayjs(slot.time).format('HH:mm'))
+                                .join(', ')
+                            : formatRainWindowRange(window.start, window.end)}
+                        </strong>
+                        <p className="field-hint" style={{ marginBottom: 0 }}>
+                          Window: {formatRainWindowRange(window.start, window.end)} | Peak rain chance {window.peakProbability.toFixed(0)}%
+                        </p>
+                      </div>
+                      {window.likelyTimes.length > 0 && (
+                        <div className="rain-time-list">
+                          {window.likelyTimes.map((slot) => (
+                            <span key={`${window.id}_${slot.time}`} className="rain-time-chip">
+                              {dayjs(slot.time).format('HH:mm')} ({slot.probability.toFixed(0)}%)
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="rain-window-metrics">
+                        <span>{window.expectedRainMm.toFixed(1)} mm expected</span>
+                        <span>{window.peakRainMmPerHour.toFixed(1)} mm/h peak</span>
+                        {window.thunderRisk && (
+                          <span className="rain-risk-tag">Thunder risk</span>
+                        )}
+                        {window.lightningRisk && (
+                          <span className="rain-risk-tag danger">Lightning risk</span>
+                        )}
+                        <span className={`rain-confidence ${window.confidence}`}>
+                          {window.confidence.toUpperCase()} confidence
+                        </span>
+                      </div>
+                      <div className="rain-feedback-actions">
+                        <span className="field-hint" style={{ margin: 0 }}>
+                          Was this prediction correct?
+                        </span>
+                        <button
+                          type="button"
+                          className={
+                            rainFeedbackByWindowId.get(window.id) === 'correct'
+                              ? 'ghost is-selected'
+                              : 'ghost'
+                          }
+                          onClick={() => markRainWindowFeedback(window, 'correct')}
+                        >
+                          Correct
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            rainFeedbackByWindowId.get(window.id) === 'incorrect'
+                              ? 'ghost is-selected danger'
+                              : 'ghost danger'
+                          }
+                          onClick={() => markRainWindowFeedback(window, 'incorrect')}
+                        >
+                          Incorrect
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-state" style={{ marginTop: '0.45rem' }}>
+                  No notable rain windows are expected in the next 48 hours.
+                </p>
+              )}
+
+              <p className="field-hint" style={{ marginBottom: 0 }}>
+                Timing is computed from hourly precipitation probability and precipitation intensity from Open-Meteo for Irimbiliyam.
+              </p>
+            </div>
+          )}
         </article>
 
         <article className="forecast-full-article">
