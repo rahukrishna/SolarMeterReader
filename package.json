@@ -17,9 +17,11 @@
     "@capacitor/core": "^7.4.4",
     "@supabase/supabase-js": "^2.107.0",
     "dayjs": "^1.11.21",
+    "pdfjs-dist": "^6.0.227",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "recharts": "^3.8.1"
+    "recharts": "^3.8.1",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@capacitor/android": "^7.4.4",
