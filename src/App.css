@@ -1127,7 +1127,9 @@ button.danger {
 
 .table-wrap {
   overflow-x: auto;
+  overflow-y: auto;
   margin-top: 0.7rem;
+  max-height: 70vh;
 }
 
 .selected-row {
@@ -1152,9 +1154,18 @@ td {
   font-size: 0.84rem;
 }
 
+thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
 th {
   color: #355566;
   background: #f3f8fa;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .empty-state {
