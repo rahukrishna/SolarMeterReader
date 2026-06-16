@@ -1903,6 +1903,7 @@ function App() {
   const [bulkMeterErrors, setBulkMeterErrors] = useState<string[]>([])
   const [showDailyBreakdown, setShowDailyBreakdown] = useState(false)
   const [showWeatherOutlook, setShowWeatherOutlook] = useState(false)
+  const [energyStatsMonth, setEnergyStatsMonth] = useState('ALL')
   const [solarDailySummaries, setSolarDailySummaries] = useState<SolarDailySummary[]>([])
   const [eodSolarTotalInput, setEodSolarTotalInput] = useState('')
   const [eodSolarNoteInput, setEodSolarNoteInput] = useState('')
@@ -3271,6 +3272,48 @@ function App() {
     [filteredSolarProductionRows],
   )
 
+  const solarProductionChartSummary = useMemo(() => {
+    if (!recentSolarProductionRows.length) {
+      return {
+        average: 0,
+        maxValue: 0,
+        maxDate: '',
+      }
+    }
+
+    const total = recentSolarProductionRows.reduce((sum, row) => sum + row.total, 0)
+    const maxRow = recentSolarProductionRows.reduce((best, row) =>
+      row.total > best.total ? row : best,
+    )
+
+    return {
+      average: total / recentSolarProductionRows.length,
+      maxValue: maxRow.total,
+      maxDate: maxRow.date,
+    }
+  }, [recentSolarProductionRows])
+
+  const solarExportChartSummary = useMemo(() => {
+    if (!filteredSolarExportRows.length) {
+      return {
+        average: 0,
+        maxValue: 0,
+        maxDate: '',
+      }
+    }
+
+    const total = filteredSolarExportRows.reduce((sum, row) => sum + row.total, 0)
+    const maxRow = filteredSolarExportRows.reduce((best, row) =>
+      row.total > best.total ? row : best,
+    )
+
+    return {
+      average: total / filteredSolarExportRows.length,
+      maxValue: maxRow.total,
+      maxDate: maxRow.date,
+    }
+  }, [filteredSolarExportRows])
+
   const solarProductionHistoryRows = useMemo(
     () => filteredSolarProductionHistoryRows,
     [filteredSolarProductionHistoryRows],
@@ -3693,6 +3736,145 @@ function App() {
 
     return alerts.slice(-8).reverse()
   }, [derivedReadings])
+
+  const energyStatsMonthOptions = useMemo(() => {
+    const months = Array.from(
+      new Set(solarDailyProductionRows.map((row) => dayjs(row.date).format('YYYY-MM'))),
+    )
+    return months.sort((a, b) => b.localeCompare(a))
+  }, [solarDailyProductionRows])
+
+  const energyAverages = useMemo(() => {
+    const todayStart = dayjs().startOf('day')
+
+    const scopedSeries =
+      energyStatsMonth === 'ALL'
+        ? completedDailySeries
+        : completedDailySeries.filter(
+            (row) => dayjs(row.date).format('YYYY-MM') === energyStatsMonth,
+          )
+
+    const scopedSolarProductionRows =
+      energyStatsMonth === 'ALL'
+        ? solarDailyProductionRows.filter((row) => dayjs(row.date).isBefore(todayStart, 'day'))
+        : solarDailyProductionRows.filter(
+            (row) =>
+              dayjs(row.date).format('YYYY-MM') === energyStatsMonth &&
+              dayjs(row.date).isBefore(todayStart, 'day'),
+          )
+
+    const zeroStats = {
+      averages: { total: 0, weekly: 0, monthly: 0, yearly: 0 },
+      perDay: { total: 0, weekly: 0, monthly: 0, yearly: 0 },
+    }
+
+    if (!scopedSeries.length) {
+      return {
+        sampleDays: 0,
+        solar: {
+          ...zeroStats,
+          maxProduced: 0,
+          maxProducedDate: '',
+          minProduced: 0,
+          minProducedDate: '',
+        },
+        export: {
+          ...zeroStats,
+        },
+      }
+    }
+
+    const latestDate = dayjs(scopedSeries[scopedSeries.length - 1].date)
+    const periodRows = (days: number) =>
+      scopedSeries.filter((row) => {
+        const rowDay = dayjs(row.date)
+        const start = latestDate.subtract(days - 1, 'day')
+        return rowDay.isSame(start, 'day') || rowDay.isAfter(start, 'day')
+      })
+
+    const computeMetricStats = (metric: 'solar' | 'export') => {
+      const total = scopedSeries.reduce((sum, row) => sum + row[metric], 0)
+      const days = scopedSeries.length
+      const weeks = new Set(
+        scopedSeries.map((row) => dayjs(row.date).startOf('week').format('YYYY-MM-DD')),
+      ).size
+      const months = new Set(
+        scopedSeries.map((row) => dayjs(row.date).format('YYYY-MM')),
+      ).size
+      const years = new Set(
+        scopedSeries.map((row) => dayjs(row.date).format('YYYY')),
+      ).size
+
+      const weeklyRows = periodRows(7)
+      const monthlyRows = periodRows(30)
+      const yearlyRows = periodRows(365)
+
+      return {
+        averages: {
+          total: days > 0 ? total / days : 0,
+          weekly: weeks > 0 ? total / weeks : 0,
+          monthly: months > 0 ? total / months : 0,
+          yearly: years > 0 ? total / years : 0,
+        },
+        perDay: {
+          total: days > 0 ? total / days : 0,
+          weekly:
+            weeklyRows.length > 0
+              ? weeklyRows.reduce((sum, row) => sum + row[metric], 0) / weeklyRows.length
+              : 0,
+          monthly:
+            monthlyRows.length > 0
+              ? monthlyRows.reduce((sum, row) => sum + row[metric], 0) / monthlyRows.length
+              : 0,
+          yearly:
+            yearlyRows.length > 0
+              ? yearlyRows.reduce((sum, row) => sum + row[metric], 0) / yearlyRows.length
+              : 0,
+        },
+      }
+    }
+
+    const solarStats = computeMetricStats('solar')
+    const exportStats = computeMetricStats('export')
+
+    const maxSolarRow = scopedSolarProductionRows.length
+      ? scopedSolarProductionRows.reduce(
+          (best, row) =>
+            row.total > best.solar ? { date: row.date, solar: row.total } : best,
+          {
+            date: scopedSolarProductionRows[0].date,
+            solar: scopedSolarProductionRows[0].total,
+          },
+        )
+      : { date: '', solar: 0 }
+
+    const positiveSolarRows = scopedSolarProductionRows.filter((row) => row.total > 0)
+
+    const minSolarRow = positiveSolarRows.length
+      ? positiveSolarRows.reduce(
+          (best, row) =>
+            row.total < best.solar ? { date: row.date, solar: row.total } : best,
+          {
+            date: positiveSolarRows[0].date,
+            solar: positiveSolarRows[0].total,
+          },
+        )
+      : { date: '', solar: 0 }
+
+    return {
+      sampleDays: scopedSeries.length,
+      solar: {
+        ...solarStats,
+        maxProduced: maxSolarRow.solar,
+        maxProducedDate: maxSolarRow.date,
+        minProduced: minSolarRow.solar,
+        minProducedDate: minSolarRow.date,
+      },
+      export: {
+        ...exportStats,
+      },
+    }
+  }, [completedDailySeries, energyStatsMonth, solarDailyProductionRows])
 
   const solarKpis = useMemo(() => {
     if (!selectedCycle) {
@@ -5691,6 +5873,22 @@ function App() {
                   </ResponsiveContainer>
                 </div>
 
+                <div className="tracker-metrics" style={{ marginTop: '0.6rem' }}>
+                  <div>
+                    <span>Total Average (Per Day)</span>
+                    <strong>{formatUnits(solarProductionChartSummary.average)}</strong>
+                  </div>
+                  <div>
+                    <span>Max Produced in a Day</span>
+                    <strong>
+                      {formatUnits(solarProductionChartSummary.maxValue)}
+                      {solarProductionChartSummary.maxDate
+                        ? ` on ${dayjs(solarProductionChartSummary.maxDate).format('DD MMM YYYY')}`
+                        : ''}
+                    </strong>
+                  </div>
+                </div>
+
                 <div className="table-wrap solar-daily-table-wrap">
                   <table>
                     <thead>
@@ -5750,6 +5948,22 @@ function App() {
                       <Line type="monotone" dataKey="total" stroke="#1a5f80" strokeWidth={2} dot={false} />
                     </ComposedChart>
                   </ResponsiveContainer>
+                </div>
+
+                <div className="tracker-metrics" style={{ marginTop: '0.6rem' }}>
+                  <div>
+                    <span>Total Average (Per Day)</span>
+                    <strong>{formatUnits(solarExportChartSummary.average)}</strong>
+                  </div>
+                  <div>
+                    <span>Max Exported in a Day</span>
+                    <strong>
+                      {formatUnits(solarExportChartSummary.maxValue)}
+                      {solarExportChartSummary.maxDate
+                        ? ` on ${dayjs(solarExportChartSummary.maxDate).format('DD MMM YYYY')}`
+                        : ''}
+                    </strong>
+                  </div>
                 </div>
 
                 <div className="table-wrap solar-daily-table-wrap">
@@ -6836,6 +7050,117 @@ function App() {
         </article>
 
         <article>
+          <div className="section-head">
+            <h2>Average Solar Generated</h2>
+            <label style={{ minWidth: '170px' }}>
+              <span className="field-hint" style={{ marginBottom: '0.25rem', display: 'block' }}>Month Filter</span>
+              <select
+                value={energyStatsMonth}
+                onChange={(event) => setEnergyStatsMonth(event.target.value)}
+              >
+                <option value="ALL">All Months</option>
+                {energyStatsMonthOptions.map((month) => (
+                  <option key={month} value={month}>
+                    {dayjs(`${month}-01`).format('MMM YYYY')}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="field-hint">Data points used: {energyAverages.sampleDays} day(s)</p>
+          <div className="tracker-metrics">
+            <div>
+              <span>Average Solar Generated Totally</span>
+              <strong>{formatUnits(energyAverages.solar.averages.total)}</strong>
+            </div>
+            <div>
+              <span>Average Solar Generated Weekly</span>
+              <strong>{formatUnits(energyAverages.solar.averages.weekly)}</strong>
+            </div>
+            <div>
+              <span>Average Solar Generated Monthly</span>
+              <strong>{formatUnits(energyAverages.solar.averages.monthly)}</strong>
+            </div>
+            <div>
+              <span>Average Solar Generated Yearly</span>
+              <strong>{formatUnits(energyAverages.solar.averages.yearly)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Total)</span>
+              <strong>{formatUnits(energyAverages.solar.perDay.total)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Weekly)</span>
+              <strong>{formatUnits(energyAverages.solar.perDay.weekly)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Monthly)</span>
+              <strong>{formatUnits(energyAverages.solar.perDay.monthly)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Yearly)</span>
+              <strong>{formatUnits(energyAverages.solar.perDay.yearly)}</strong>
+            </div>
+            <div>
+              <span>Max Produced in a Day</span>
+              <strong>
+                {formatUnits(energyAverages.solar.maxProduced)}
+                {energyAverages.solar.maxProducedDate
+                  ? ` on ${dayjs(energyAverages.solar.maxProducedDate).format('DD MMM YYYY')}`
+                  : ''}
+              </strong>
+            </div>
+            <div>
+              <span>Min Produced in a Day</span>
+              <strong>
+                {formatUnits(energyAverages.solar.minProduced)}
+                {energyAverages.solar.minProducedDate
+                  ? ` on ${dayjs(energyAverages.solar.minProducedDate).format('DD MMM YYYY')}`
+                  : ''}
+              </strong>
+            </div>
+          </div>
+        </article>
+
+        <article>
+          <h2>Average Solar Exported</h2>
+          <div className="tracker-metrics">
+            <div>
+              <span>Average Solar Exported Totally</span>
+              <strong>{formatUnits(energyAverages.export.averages.total)}</strong>
+            </div>
+            <div>
+              <span>Average Solar Exported Weekly</span>
+              <strong>{formatUnits(energyAverages.export.averages.weekly)}</strong>
+            </div>
+            <div>
+              <span>Average Solar Exported Monthly</span>
+              <strong>{formatUnits(energyAverages.export.averages.monthly)}</strong>
+            </div>
+            <div>
+              <span>Average Solar Exported Yearly</span>
+              <strong>{formatUnits(energyAverages.export.averages.yearly)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Total)</span>
+              <strong>{formatUnits(energyAverages.export.perDay.total)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Weekly)</span>
+              <strong>{formatUnits(energyAverages.export.perDay.weekly)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Monthly)</span>
+              <strong>{formatUnits(energyAverages.export.perDay.monthly)}</strong>
+            </div>
+            <div>
+              <span>Per Day (Yearly)</span>
+              <strong>{formatUnits(energyAverages.export.perDay.yearly)}</strong>
+            </div>
+          </div>
+        </article>
+
+        <article>
           <h2>Goal Tracking</h2>
           <div className="goals-grid">
             <label>
@@ -6965,6 +7290,120 @@ function App() {
               />
             </ComposedChart>
           </ResponsiveContainer>
+        </div>
+
+        <div className="section-head" style={{ marginTop: '1rem' }}>
+          <h3 style={{ margin: 0, fontSize: '1rem' }}>Average Analytics</h3>
+          <label style={{ minWidth: '170px' }}>
+            <span className="field-hint" style={{ marginBottom: '0.25rem', display: 'block' }}>Month Filter</span>
+            <select
+              value={energyStatsMonth}
+              onChange={(event) => setEnergyStatsMonth(event.target.value)}
+            >
+              <option value="ALL">All Months</option>
+              {energyStatsMonthOptions.map((month) => (
+                <option key={month} value={month}>
+                  {dayjs(`${month}-01`).format('MMM YYYY')}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="insights-grid" style={{ marginTop: '0.75rem' }}>
+          <article>
+            <h3>Solar Generated</h3>
+            <div className="tracker-metrics">
+              <div>
+                <span>Average (Total)</span>
+                <strong>{formatUnits(energyAverages.solar.averages.total)}</strong>
+              </div>
+              <div>
+                <span>Average (Weekly)</span>
+                <strong>{formatUnits(energyAverages.solar.averages.weekly)}</strong>
+              </div>
+              <div>
+                <span>Average (Monthly)</span>
+                <strong>{formatUnits(energyAverages.solar.averages.monthly)}</strong>
+              </div>
+              <div>
+                <span>Average (Yearly)</span>
+                <strong>{formatUnits(energyAverages.solar.averages.yearly)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Total)</span>
+                <strong>{formatUnits(energyAverages.solar.perDay.total)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Weekly)</span>
+                <strong>{formatUnits(energyAverages.solar.perDay.weekly)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Monthly)</span>
+                <strong>{formatUnits(energyAverages.solar.perDay.monthly)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Yearly)</span>
+                <strong>{formatUnits(energyAverages.solar.perDay.yearly)}</strong>
+              </div>
+              <div>
+                <span>Max Produced in a Day</span>
+                <strong>
+                  {formatUnits(energyAverages.solar.maxProduced)}
+                  {energyAverages.solar.maxProducedDate
+                    ? ` on ${dayjs(energyAverages.solar.maxProducedDate).format('DD MMM YYYY')}`
+                    : ''}
+                </strong>
+              </div>
+              <div>
+                <span>Min Produced in a Day</span>
+                <strong>
+                  {formatUnits(energyAverages.solar.minProduced)}
+                  {energyAverages.solar.minProducedDate
+                    ? ` on ${dayjs(energyAverages.solar.minProducedDate).format('DD MMM YYYY')}`
+                    : ''}
+                </strong>
+              </div>
+            </div>
+          </article>
+
+          <article>
+            <h3>Solar Exported</h3>
+            <div className="tracker-metrics">
+              <div>
+                <span>Average (Total)</span>
+                <strong>{formatUnits(energyAverages.export.averages.total)}</strong>
+              </div>
+              <div>
+                <span>Average (Weekly)</span>
+                <strong>{formatUnits(energyAverages.export.averages.weekly)}</strong>
+              </div>
+              <div>
+                <span>Average (Monthly)</span>
+                <strong>{formatUnits(energyAverages.export.averages.monthly)}</strong>
+              </div>
+              <div>
+                <span>Average (Yearly)</span>
+                <strong>{formatUnits(energyAverages.export.averages.yearly)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Total)</span>
+                <strong>{formatUnits(energyAverages.export.perDay.total)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Weekly)</span>
+                <strong>{formatUnits(energyAverages.export.perDay.weekly)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Monthly)</span>
+                <strong>{formatUnits(energyAverages.export.perDay.monthly)}</strong>
+              </div>
+              <div>
+                <span>Per Day (Yearly)</span>
+                <strong>{formatUnits(energyAverages.export.perDay.yearly)}</strong>
+              </div>
+            </div>
+          </article>
         </div>
 
         {!chartData.length && (
