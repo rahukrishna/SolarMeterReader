@@ -3745,22 +3745,18 @@ function App() {
   }, [solarDailyProductionRows])
 
   const energyAverages = useMemo(() => {
-    const todayStart = dayjs().startOf('day')
-
-    const scopedSeries =
+    const scopedSolarProductionRows =
       energyStatsMonth === 'ALL'
-        ? completedDailySeries
-        : completedDailySeries.filter(
+        ? solarDailyProductionRows
+        : solarDailyProductionRows.filter(
             (row) => dayjs(row.date).format('YYYY-MM') === energyStatsMonth,
           )
 
-    const scopedSolarProductionRows =
+    const scopedExportRows =
       energyStatsMonth === 'ALL'
-        ? solarDailyProductionRows.filter((row) => dayjs(row.date).isBefore(todayStart, 'day'))
-        : solarDailyProductionRows.filter(
-            (row) =>
-              dayjs(row.date).format('YYYY-MM') === energyStatsMonth &&
-              dayjs(row.date).isBefore(todayStart, 'day'),
+        ? solarExportDailyRows
+        : solarExportDailyRows.filter(
+            (row) => dayjs(row.date).format('YYYY-MM') === energyStatsMonth,
           )
 
     const zeroStats = {
@@ -3768,7 +3764,7 @@ function App() {
       perDay: { total: 0, weekly: 0, monthly: 0, yearly: 0 },
     }
 
-    if (!scopedSeries.length) {
+    if (!scopedSolarProductionRows.length && !scopedExportRows.length) {
       return {
         sampleDays: 0,
         solar: {
@@ -3784,25 +3780,32 @@ function App() {
       }
     }
 
-    const latestDate = dayjs(scopedSeries[scopedSeries.length - 1].date)
-    const periodRows = (days: number) =>
-      scopedSeries.filter((row) => {
-        const rowDay = dayjs(row.date)
-        const start = latestDate.subtract(days - 1, 'day')
-        return rowDay.isSame(start, 'day') || rowDay.isAfter(start, 'day')
-      })
+    const computeMetricStats = (rows: Array<{ date: string; total: number }>) => {
+      if (!rows.length) {
+        return {
+          averages: { total: 0, weekly: 0, monthly: 0, yearly: 0 },
+          perDay: { total: 0, weekly: 0, monthly: 0, yearly: 0 },
+        }
+      }
 
-    const computeMetricStats = (metric: 'solar' | 'export') => {
-      const total = scopedSeries.reduce((sum, row) => sum + row[metric], 0)
-      const days = scopedSeries.length
+      const latestDate = dayjs(rows[rows.length - 1].date)
+      const periodRows = (daysWindow: number) =>
+        rows.filter((row) => {
+          const rowDay = dayjs(row.date)
+          const start = latestDate.subtract(daysWindow - 1, 'day')
+          return rowDay.isSame(start, 'day') || rowDay.isAfter(start, 'day')
+        })
+
+      const total = rows.reduce((sum, row) => sum + row.total, 0)
+      const days = rows.length
       const weeks = new Set(
-        scopedSeries.map((row) => dayjs(row.date).startOf('week').format('YYYY-MM-DD')),
+        rows.map((row) => dayjs(row.date).startOf('week').format('YYYY-MM-DD')),
       ).size
       const months = new Set(
-        scopedSeries.map((row) => dayjs(row.date).format('YYYY-MM')),
+        rows.map((row) => dayjs(row.date).format('YYYY-MM')),
       ).size
       const years = new Set(
-        scopedSeries.map((row) => dayjs(row.date).format('YYYY')),
+        rows.map((row) => dayjs(row.date).format('YYYY')),
       ).size
 
       const weeklyRows = periodRows(7)
@@ -3820,22 +3823,26 @@ function App() {
           total: days > 0 ? total / days : 0,
           weekly:
             weeklyRows.length > 0
-              ? weeklyRows.reduce((sum, row) => sum + row[metric], 0) / weeklyRows.length
+              ? weeklyRows.reduce((sum, row) => sum + row.total, 0) / weeklyRows.length
               : 0,
           monthly:
             monthlyRows.length > 0
-              ? monthlyRows.reduce((sum, row) => sum + row[metric], 0) / monthlyRows.length
+              ? monthlyRows.reduce((sum, row) => sum + row.total, 0) / monthlyRows.length
               : 0,
           yearly:
             yearlyRows.length > 0
-              ? yearlyRows.reduce((sum, row) => sum + row[metric], 0) / yearlyRows.length
+              ? yearlyRows.reduce((sum, row) => sum + row.total, 0) / yearlyRows.length
               : 0,
         },
       }
     }
 
-    const solarStats = computeMetricStats('solar')
-    const exportStats = computeMetricStats('export')
+    const solarStats = computeMetricStats(
+      scopedSolarProductionRows.map((row) => ({ date: row.date, total: row.total })),
+    )
+    const exportStats = computeMetricStats(
+      scopedExportRows.map((row) => ({ date: row.date, total: row.total })),
+    )
 
     const maxSolarRow = scopedSolarProductionRows.length
       ? scopedSolarProductionRows.reduce(
@@ -3862,7 +3869,7 @@ function App() {
       : { date: '', solar: 0 }
 
     return {
-      sampleDays: scopedSeries.length,
+      sampleDays: scopedSolarProductionRows.length,
       solar: {
         ...solarStats,
         maxProduced: maxSolarRow.solar,
@@ -3874,7 +3881,7 @@ function App() {
         ...exportStats,
       },
     }
-  }, [completedDailySeries, energyStatsMonth, solarDailyProductionRows])
+  }, [energyStatsMonth, solarDailyProductionRows, solarExportDailyRows])
 
   const solarKpis = useMemo(() => {
     if (!selectedCycle) {
