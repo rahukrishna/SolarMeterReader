@@ -3931,7 +3931,7 @@ function App() {
     logActivity('save-kseb-bill', `${ksebBillEntryDate} ${ksebBillEntryTime}`)
 
     if (supabase && cloudUser) {
-      void pushToCloud(nextReadings, true)
+      void pushToCloud(nextReadings, true, solarUsageLogs, solarDailySummaries, nextKsebSnapshot)
     }
   }
 
@@ -4438,6 +4438,7 @@ function App() {
     silent = false,
     solarLogsToSync = solarUsageLogs,
     solarSummariesToSync = solarDailySummaries,
+    ksebBillToSync = ksebBillSnapshot,
   ) => {
     if (!supabase || !cloudUser) {
       if (!silent) {
@@ -4488,16 +4489,16 @@ function App() {
       updated_at: entry.updatedAt,
     }))
 
-    const ksebBillPayload = ksebBillSnapshot
+    const ksebBillPayload = ksebBillToSync
       ? [{
-          id: `kseb-${ksebBillSnapshot.date}T${ksebBillSnapshot.time}`,
+          id: `kseb-${ksebBillToSync.date}T${ksebBillToSync.time}`,
           user_id: cloudUser.id,
-          bill_date: ksebBillSnapshot.date,
-          bill_time: ksebBillSnapshot.time,
-          import_total: ksebBillSnapshot.importTotal,
-          export_total: ksebBillSnapshot.exportTotal,
-          net: ksebBillSnapshot.net,
-          solar_generated: ksebBillSnapshot.solarGenerated,
+          bill_date: ksebBillToSync.date,
+          bill_time: ksebBillToSync.time,
+          import_total: ksebBillToSync.importTotal,
+          export_total: ksebBillToSync.exportTotal,
+          net: ksebBillToSync.net,
+          solar_generated: ksebBillToSync.solarGenerated,
           updated_at: new Date().toISOString(),
         }]
       : []
