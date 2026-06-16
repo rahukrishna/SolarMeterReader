@@ -109,6 +109,18 @@ type CloudSolarDailySummaryRow = {
   updated_at: string
 }
 
+type CloudKsebBillRow = {
+  id: string
+  user_id: string
+  bill_date: string
+  bill_time: string
+  import_total: number
+  export_total: number
+  net: number
+  solar_generated: number
+  updated_at: string
+}
+
 type ActivityLogEntry = {
   id: string
   timestamp: string
@@ -212,7 +224,6 @@ const DAILY_FORECAST_SNAPSHOT_KEY = 'solar-meter-daily-forecast-snapshots-v1'
 const FORECAST_AUDIT_KEY = 'solar-meter-forecast-audit-v1'
 const SOLAR_USAGE_LOG_KEY = 'solar-meter-solar-usage-log-v1'
 const SOLAR_DAILY_SUMMARY_KEY = 'solar-meter-solar-daily-summary-v1'
-const KSEB_BILL_SNAPSHOT_KEY = 'solar-meter-kseb-bill-snapshot-v1'
 const FIRST_LAUNCH_AUTH_KEY = 'solar-meter-first-launch-auth-v1'
 const RAIN_FEEDBACK_KEY = 'solar-meter-rain-feedback-v1'
 const DATA_VERSION = 3
@@ -1934,7 +1945,6 @@ function App() {
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
     const rawSettings = localStorage.getItem(SETTINGS_KEY)
-    const rawKsebSnapshot = localStorage.getItem(KSEB_BILL_SNAPSHOT_KEY)
     const firstLaunchAuth = localStorage.getItem(FIRST_LAUNCH_AUTH_KEY)
     const versionRaw = localStorage.getItem(DATA_VERSION_KEY)
     const version = versionRaw ? Number(versionRaw) : 0
@@ -1963,10 +1973,7 @@ function App() {
       setReadings(normalized)
 
       const parsedKsebFromReadings = findLatestKsebBillReading(normalized)
-      if (rawKsebSnapshot) {
-        const parsedSnapshot = JSON.parse(rawKsebSnapshot) as KsebBillSnapshot
-        setKsebBillSnapshot(parsedSnapshot)
-      } else if (parsedKsebFromReadings) {
+      if (parsedKsebFromReadings) {
         setKsebBillSnapshot({
           date: parsedKsebFromReadings.date,
           time: parsedKsebFromReadings.time,
@@ -2250,17 +2257,6 @@ function App() {
     }
     localStorage.setItem(ACTIVITY_LOG_KEY, JSON.stringify(activityLog.slice(0, 100)))
   }, [activityLog, isHydrated])
-
-  useEffect(() => {
-    if (!isHydrated) {
-      return
-    }
-    if (ksebBillSnapshot) {
-      localStorage.setItem(KSEB_BILL_SNAPSHOT_KEY, JSON.stringify(ksebBillSnapshot))
-    } else {
-      localStorage.removeItem(KSEB_BILL_SNAPSHOT_KEY)
-    }
-  }, [isHydrated, ksebBillSnapshot])
 
   useEffect(() => {
     const onBeforeInstallPrompt = (event: Event) => {
@@ -4492,7 +4488,21 @@ function App() {
       updated_at: entry.updatedAt,
     }))
 
-    const [meterResult, solarLogResult, solarSummaryResult] = await Promise.all([
+    const ksebBillPayload = ksebBillSnapshot
+      ? [{
+          id: `kseb-${ksebBillSnapshot.date}T${ksebBillSnapshot.time}`,
+          user_id: cloudUser.id,
+          bill_date: ksebBillSnapshot.date,
+          bill_time: ksebBillSnapshot.time,
+          import_total: ksebBillSnapshot.importTotal,
+          export_total: ksebBillSnapshot.exportTotal,
+          net: ksebBillSnapshot.net,
+          solar_generated: ksebBillSnapshot.solarGenerated,
+          updated_at: new Date().toISOString(),
+        }]
+      : []
+
+    const [meterResult, solarLogResult, solarSummaryResult, ksebResult] = await Promise.all([
       supabase.from('meter_readings').upsert(payload, { onConflict: 'id' }),
       solarLogPayload.length
         ? supabase.from('solar_usage_logs').upsert(solarLogPayload, { onConflict: 'id' })
@@ -4502,15 +4512,18 @@ function App() {
             .from('solar_daily_summaries')
             .upsert(solarSummaryPayload, { onConflict: 'user_id,summary_date' })
         : Promise.resolve({ error: null }),
+      ksebBillPayload.length
+        ? supabase.from('kseb_bill_snapshots').upsert(ksebBillPayload, { onConflict: 'user_id,bill_date' })
+        : Promise.resolve({ error: null }),
     ])
 
-    const error = meterResult.error ?? solarLogResult.error ?? solarSummaryResult.error
+    const error = meterResult.error ?? solarLogResult.error ?? solarSummaryResult.error ?? ksebResult.error
 
     if (error) {
       setCloudMessage(`Cloud push failed: ${error.message}`)
       setSyncStatus('error')
     } else if (!silent) {
-      setCloudMessage('Cloud sync complete: readings and solar tracker uploaded.')
+      setCloudMessage('Cloud sync complete: readings, solar tracker, and KSEB bill uploaded.')
       setSyncStatus('success')
       setLastSyncAt(new Date().toISOString())
       setPendingSyncChanges(0)
@@ -4537,7 +4550,7 @@ function App() {
       setCloudMessage('Downloading readings from cloud...')
     }
 
-    const [meterResult, solarLogResult, solarSummaryResult] = await Promise.all([
+    const [meterResult, solarLogResult, solarSummaryResult, ksebResult] = await Promise.all([
       supabase
         .from('meter_readings')
         .select(
@@ -4556,9 +4569,15 @@ function App() {
         .select('user_id, summary_date, total_kwh, note, updated_at')
         .eq('user_id', cloudUser.id)
         .order('summary_date', { ascending: false }),
+      supabase
+        .from('kseb_bill_snapshots')
+        .select('id, user_id, bill_date, bill_time, import_total, export_total, net, solar_generated, updated_at')
+        .eq('user_id', cloudUser.id)
+        .order('bill_date', { ascending: false })
+        .limit(1),
     ])
 
-    const error = meterResult.error ?? solarLogResult.error ?? solarSummaryResult.error
+    const error = meterResult.error ?? solarLogResult.error ?? solarSummaryResult.error ?? ksebResult.error
 
     if (error) {
       setCloudMessage(`Cloud pull failed: ${error.message}`)
@@ -4602,18 +4621,31 @@ function App() {
       updatedAt: row.updated_at,
     }))
 
+    const cloudKsebBill = ((ksebResult.data ?? [])[0]) as CloudKsebBillRow | undefined
+    if (cloudKsebBill) {
+      setKsebBillSnapshot({
+        date: cloudKsebBill.bill_date,
+        time: cloudKsebBill.bill_time,
+        importTotal: Number(cloudKsebBill.import_total),
+        exportTotal: Number(cloudKsebBill.export_total),
+        net: Number(cloudKsebBill.net),
+        solarGenerated: Number(cloudKsebBill.solar_generated ?? 0),
+        updatedAt: cloudKsebBill.updated_at,
+      })
+    }
+
     const sanitizedCloudReadings = sortReadings(
       stripLegacySeedReadings(applyKnownCorrections(cloudReadings)),
     )
 
-    if (cloudReadings.length > 0 || cloudSolarLogs.length > 0 || cloudSolarSummaries.length > 0) {
+    if (cloudReadings.length > 0 || cloudSolarLogs.length > 0 || cloudSolarSummaries.length > 0 || cloudKsebBill) {
       setReadings(sanitizedCloudReadings)
       setSolarUsageLogs(cloudSolarLogs)
       setSolarDailySummaries(cloudSolarSummaries)
       setCloudMessage(
         silent
-          ? `Auto-synced cloud data: ${sanitizedCloudReadings.length} readings, ${cloudSolarLogs.length} solar logs.`
-          : `Cloud download complete: ${sanitizedCloudReadings.length} readings, ${cloudSolarLogs.length} solar logs, ${cloudSolarSummaries.length} EOD summaries.`,
+          ? `Auto-synced cloud data: ${sanitizedCloudReadings.length} readings, ${cloudSolarLogs.length} solar logs, KSEB bill.`
+          : `Cloud download complete: ${sanitizedCloudReadings.length} readings, ${cloudSolarLogs.length} solar logs, ${cloudSolarSummaries.length} EOD summaries, KSEB bill.`,
       )
       setSyncStatus('success')
       setLastSyncAt(new Date().toISOString())

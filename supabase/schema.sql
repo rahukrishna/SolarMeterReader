@@ -121,3 +121,43 @@ create policy "Users can delete own solar daily summaries"
 on public.solar_daily_summaries
 for delete
 using (auth.uid() = user_id);
+
+create table if not exists public.kseb_bill_snapshots (
+  id uuid primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  bill_date date not null,
+  bill_time time not null,
+  import_total numeric not null,
+  export_total numeric not null,
+  net numeric not null,
+  solar_generated numeric not null default 0,
+  updated_at timestamptz not null default now(),
+  unique(user_id, bill_date)
+);
+
+alter table public.kseb_bill_snapshots enable row level security;
+
+drop policy if exists "Users can read own KSEB bill snapshots" on public.kseb_bill_snapshots;
+create policy "Users can read own KSEB bill snapshots"
+on public.kseb_bill_snapshots
+for select
+using (auth.uid() = user_id);
+
+drop policy if exists "Users can insert own KSEB bill snapshots" on public.kseb_bill_snapshots;
+create policy "Users can insert own KSEB bill snapshots"
+on public.kseb_bill_snapshots
+for insert
+with check (auth.uid() = user_id);
+
+drop policy if exists "Users can update own KSEB bill snapshots" on public.kseb_bill_snapshots;
+create policy "Users can update own KSEB bill snapshots"
+on public.kseb_bill_snapshots
+for update
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+drop policy if exists "Users can delete own KSEB bill snapshots" on public.kseb_bill_snapshots;
+create policy "Users can delete own KSEB bill snapshots"
+on public.kseb_bill_snapshots
+for delete
+using (auth.uid() = user_id);
