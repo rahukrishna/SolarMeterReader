@@ -4491,7 +4491,7 @@ function App() {
 
     const ksebBillPayload = ksebBillToSync
       ? [{
-          id: `kseb-${ksebBillToSync.date}T${ksebBillToSync.time}`,
+          id: createReadingId(),
           user_id: cloudUser.id,
           bill_date: ksebBillToSync.date,
           bill_time: ksebBillToSync.time,
