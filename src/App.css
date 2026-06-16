@@ -114,6 +114,11 @@
   box-shadow: 0 10px 18px -14px rgba(15, 123, 86, 0.92);
 }
 
+.quick-add-button-tertiary {
+  background: linear-gradient(135deg, #1d6f91, #15506d);
+  box-shadow: 0 10px 18px -14px rgba(21, 80, 109, 0.9);
+}
+
 .app-bottom-nav {
   display: none;
 }
@@ -452,6 +457,35 @@
   align-items: end;
 }
 
+.manage-bulk-button {
+  border: 1px solid transparent;
+  color: #f8fbfd;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  padding: 0.62rem 0.8rem;
+  box-shadow: 0 12px 18px -14px rgba(14, 43, 56, 0.85);
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    filter 140ms ease;
+}
+
+.manage-bulk-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 22px -14px rgba(14, 43, 56, 0.95);
+  filter: saturate(1.05);
+}
+
+.manage-bulk-meter-button {
+  background: linear-gradient(135deg, #1a6a89, #15516a);
+  border-color: #246e89;
+}
+
+.manage-bulk-solar-button {
+  background: linear-gradient(135deg, #167a58, #0f6246);
+  border-color: #268063;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -606,6 +640,18 @@ button.danger {
   margin: 0;
   color: #325667;
   font-size: 0.85rem;
+}
+
+.kseb-bill-section {
+  margin-top: 0.9rem;
+  border: 1px solid #d2dfe7;
+  border-radius: 12px;
+  padding: 0.75rem;
+  background: #f8fbfd;
+}
+
+.kseb-bill-form-grid {
+  margin-top: 0.7rem;
 }
 
 .reading-form button {
@@ -1036,11 +1082,128 @@ button.danger {
 }
 
 .solar-log-sheet {
-  max-width: 560px;
+  max-width: 720px;
+}
+
+.bulk-solar-sheet {
+  width: min(1120px, 100%);
+}
+
+.bulk-meter-sheet {
+  width: min(1120px, 100%);
+}
+
+.bulk-solar-actions,
+.bulk-solar-save-actions {
+  margin-top: 0.7rem;
+}
+
+.bulk-meter-actions,
+.bulk-meter-save-actions {
+  margin-top: 0.7rem;
+}
+
+.bulk-solar-sticky-bar {
+  position: sticky;
+  bottom: -1rem;
+  z-index: 2;
+  padding: 0.55rem 0;
+  margin-top: 0.9rem;
+  background: linear-gradient(180deg, rgba(253, 254, 254, 0), #fdfefe 24%);
+  border-top: 1px solid #d8e4ea;
+}
+
+.bulk-meter-sticky-bar {
+  position: sticky;
+  bottom: -1rem;
+  z-index: 2;
+  padding: 0.55rem 0;
+  margin-top: 0.9rem;
+  background: linear-gradient(180deg, rgba(253, 254, 254, 0), #fdfefe 24%);
+  border-top: 1px solid #d8e4ea;
+}
+
+.bulk-solar-list {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.bulk-meter-list {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.bulk-solar-row {
+  border: 1px solid #d4e0e7;
+  border-radius: 14px;
+  padding: 0.9rem;
+  background: linear-gradient(180deg, #fbfdfe, #f5f9fb);
+}
+
+.bulk-meter-row {
+  border: 1px solid #d4e0e7;
+  border-radius: 14px;
+  padding: 0.9rem;
+  background: linear-gradient(180deg, #fbfdfe, #f5f9fb);
+}
+
+.bulk-solar-row-head {
+  margin-bottom: 0.65rem;
+}
+
+.bulk-meter-row-head {
+  margin-bottom: 0.65rem;
+}
+
+.bulk-solar-row-head h3 {
+  margin: 0;
+  color: #20475d;
+}
+
+.bulk-meter-row-head h3 {
+  margin: 0;
+  color: #20475d;
+}
+
+.bulk-solar-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.bulk-meter-form {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.bulk-solar-form .note-field {
+  grid-column: 1 / -1;
+}
+
+.bulk-meter-form .note-field {
+  grid-column: 1 / -1;
 }
 
 .solar-log-form {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(140px, 1fr) minmax(140px, 1fr) minmax(220px, 1.4fr);
+  gap: 0.7rem;
+}
+
+.solar-log-subtitle {
+  margin: 0.3rem 0 0;
+}
+
+.solar-log-actions {
+  margin-top: 0.35rem;
+}
+
+.solar-log-date-field,
+.solar-log-time-field,
+.solar-log-value-field {
+  min-width: 0;
+}
+
+.solar-log-form .note-field {
+  grid-column: 1 / -1;
 }
 
 .section-head {
@@ -1410,6 +1573,10 @@ th {
     min-height: 180px;
   }
 
+  .solar-log-form {
+    grid-template-columns: 1fr;
+  }
+
   .hero-brandmark-large {
     --brand-size: 118px;
     right: 24px;
@@ -1598,6 +1765,22 @@ th {
     border-radius: 18px 18px 0 0;
     padding: 0.85rem;
     padding-bottom: calc(0.85rem + env(safe-area-inset-bottom, 16px));
+  }
+
+  .bulk-solar-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bulk-solar-form .note-field {
+    grid-column: 1 / -1;
+  }
+
+  .bulk-meter-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .bulk-meter-form .note-field {
+    grid-column: 1 / -1;
   }
 
   .form-card {

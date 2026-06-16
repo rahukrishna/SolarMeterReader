@@ -157,11 +157,39 @@ type SolarDailySummary = {
   updatedAt: string
 }
 
+type BulkSolarSummaryFormRow = {
+  id: string
+  date: string
+  time: string
+  total: string
+  note: string
+}
+
+type BulkMeterFormRow = {
+  id: string
+  date: string
+  time: string
+  importTotal: string
+  exportTotal: string
+  solarGenerated: string
+  note: string
+}
+
 type SolarDailyProductionRow = {
   date: string
   total: number
   source: 'manual-eod' | 'manual-reading' | 'meter-derived'
   note?: string
+}
+
+type KsebBillSnapshot = {
+  date: string
+  time: string
+  importTotal: number
+  exportTotal: number
+  net: number
+  solarGenerated: number
+  updatedAt: string
 }
 
 type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
@@ -184,6 +212,7 @@ const DAILY_FORECAST_SNAPSHOT_KEY = 'solar-meter-daily-forecast-snapshots-v1'
 const FORECAST_AUDIT_KEY = 'solar-meter-forecast-audit-v1'
 const SOLAR_USAGE_LOG_KEY = 'solar-meter-solar-usage-log-v1'
 const SOLAR_DAILY_SUMMARY_KEY = 'solar-meter-solar-daily-summary-v1'
+const KSEB_BILL_SNAPSHOT_KEY = 'solar-meter-kseb-bill-snapshot-v1'
 const FIRST_LAUNCH_AUTH_KEY = 'solar-meter-first-launch-auth-v1'
 const RAIN_FEEDBACK_KEY = 'solar-meter-rain-feedback-v1'
 const DATA_VERSION = 3
@@ -1732,6 +1761,61 @@ const extractBillText = async (file: File) => {
 }
 
 const defaultBillGeneratedAt = () => dayjs().format('YYYY-MM-DDTHH:mm')
+const defaultSolarSummaryDateTime = () => dayjs().format('YYYY-MM-DDTHH:mm')
+
+const createBulkSolarSummaryRow = (
+  previousRow?: BulkSolarSummaryFormRow,
+): BulkSolarSummaryFormRow => {
+  if (previousRow) {
+    const base = dayjs(`${previousRow.date}T${previousRow.time || '00:00'}`)
+    return {
+      id: createReadingId(),
+      date: base.isValid() ? base.add(1, 'day').format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
+      time: previousRow.time || dayjs().format('HH:mm'),
+      total: '',
+      note: '',
+    }
+  }
+
+  const current = defaultSolarSummaryDateTime()
+  return {
+    id: createReadingId(),
+    date: current.slice(0, 10),
+    time: current.slice(11, 16),
+    total: '',
+    note: '',
+  }
+}
+
+const createBulkMeterRow = (previousRow?: BulkMeterFormRow): BulkMeterFormRow => {
+  if (previousRow) {
+    const base = dayjs(`${previousRow.date}T${previousRow.time || '00:00'}`)
+    return {
+      id: createReadingId(),
+      date: base.isValid() ? base.add(1, 'day').format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD'),
+      time: previousRow.time || dayjs().format('HH:mm'),
+      importTotal: previousRow.importTotal,
+      exportTotal: previousRow.exportTotal,
+      solarGenerated: previousRow.solarGenerated,
+      note: '',
+    }
+  }
+
+  return {
+    id: createReadingId(),
+    date: dayjs().format('YYYY-MM-DD'),
+    time: dayjs().format('HH:mm'),
+    importTotal: '',
+    exportTotal: '',
+    solarGenerated: '',
+    note: '',
+  }
+}
+
+const findLatestKsebBillReading = (items: Reading[]) =>
+  [...items]
+    .filter((reading) => (reading.note ?? '').toLowerCase().includes('kseb bill'))
+    .sort((a, b) => getReadingTimestamp(b) - getReadingTimestamp(a))[0] ?? null
 
 const toPercent = (value: number) => `${value.toFixed(1)}%`
 
@@ -1771,6 +1855,13 @@ function App() {
   const [activeTab, setActiveTab] = useState<AppTab>('home')
   const [billingReferenceDate, setBillingReferenceDate] = useState(dayjs().format('YYYY-MM-DD'))
   const [billGeneratedAt, setBillGeneratedAt] = useState(defaultBillGeneratedAt)
+  const [ksebBillEntryDate, setKsebBillEntryDate] = useState(dayjs().format('YYYY-MM-DD'))
+  const [ksebBillEntryTime, setKsebBillEntryTime] = useState('07:00')
+  const [ksebBillImportInput, setKsebBillImportInput] = useState('')
+  const [ksebBillExportInput, setKsebBillExportInput] = useState('')
+  const [ksebBillNetInput, setKsebBillNetInput] = useState('')
+  const [ksebBillSolarInput, setKsebBillSolarInput] = useState('')
+  const [ksebBillSnapshot, setKsebBillSnapshot] = useState<KsebBillSnapshot | null>(null)
   const [billImportBusy, setBillImportBusy] = useState(false)
   const [billImportMessage, setBillImportMessage] = useState('')
   const [weatherSignals, setWeatherSignals] = useState<Record<string, WeatherDaySignal>>({})
@@ -1789,8 +1880,16 @@ function App() {
   const [forecastAudits, setForecastAudits] = useState<ForecastAuditEntry[]>([])
   const [solarUsageLogs, setSolarUsageLogs] = useState<SolarUsageEntry[]>([])
   const [isSolarLogModalOpen, setIsSolarLogModalOpen] = useState(false)
+  const [solarLogDate, setSolarLogDate] = useState(dayjs().format('YYYY-MM-DD'))
+  const [solarLogTime, setSolarLogTime] = useState(defaultReadingTime())
   const [solarLogValue, setSolarLogValue] = useState('')
   const [solarLogNote, setSolarLogNote] = useState('')
+  const [isBulkSolarModalOpen, setIsBulkSolarModalOpen] = useState(false)
+  const [bulkSolarRows, setBulkSolarRows] = useState<BulkSolarSummaryFormRow[]>([])
+  const [bulkSolarErrors, setBulkSolarErrors] = useState<string[]>([])
+  const [isBulkMeterModalOpen, setIsBulkMeterModalOpen] = useState(false)
+  const [bulkMeterRows, setBulkMeterRows] = useState<BulkMeterFormRow[]>([])
+  const [bulkMeterErrors, setBulkMeterErrors] = useState<string[]>([])
   const [showDailyBreakdown, setShowDailyBreakdown] = useState(false)
   const [showWeatherOutlook, setShowWeatherOutlook] = useState(false)
   const [solarDailySummaries, setSolarDailySummaries] = useState<SolarDailySummary[]>([])
@@ -1835,6 +1934,7 @@ function App() {
   useEffect(() => {
     const rawReadings = localStorage.getItem(STORAGE_KEY)
     const rawSettings = localStorage.getItem(SETTINGS_KEY)
+    const rawKsebSnapshot = localStorage.getItem(KSEB_BILL_SNAPSHOT_KEY)
     const firstLaunchAuth = localStorage.getItem(FIRST_LAUNCH_AUTH_KEY)
     const versionRaw = localStorage.getItem(DATA_VERSION_KEY)
     const version = versionRaw ? Number(versionRaw) : 0
@@ -1861,6 +1961,22 @@ function App() {
       }
 
       setReadings(normalized)
+
+      const parsedKsebFromReadings = findLatestKsebBillReading(normalized)
+      if (rawKsebSnapshot) {
+        const parsedSnapshot = JSON.parse(rawKsebSnapshot) as KsebBillSnapshot
+        setKsebBillSnapshot(parsedSnapshot)
+      } else if (parsedKsebFromReadings) {
+        setKsebBillSnapshot({
+          date: parsedKsebFromReadings.date,
+          time: parsedKsebFromReadings.time,
+          importTotal: calculateImportTotal(parsedKsebFromReadings),
+          exportTotal: calculateExportTotal(parsedKsebFromReadings),
+          net: calculateNet(parsedKsebFromReadings),
+          solarGenerated: parsedKsebFromReadings.solarGenerated,
+          updatedAt: new Date().toISOString(),
+        })
+      }
     } else {
       setReadings([])
       localStorage.setItem(DATA_VERSION_KEY, String(DATA_VERSION))
@@ -2136,6 +2252,17 @@ function App() {
   }, [activityLog, isHydrated])
 
   useEffect(() => {
+    if (!isHydrated) {
+      return
+    }
+    if (ksebBillSnapshot) {
+      localStorage.setItem(KSEB_BILL_SNAPSHOT_KEY, JSON.stringify(ksebBillSnapshot))
+    } else {
+      localStorage.removeItem(KSEB_BILL_SNAPSHOT_KEY)
+    }
+  }, [isHydrated, ksebBillSnapshot])
+
+  useEffect(() => {
     const onBeforeInstallPrompt = (event: Event) => {
       event.preventDefault()
       setInstallPromptEvent(event as BeforeInstallPromptEvent)
@@ -2384,107 +2511,103 @@ function App() {
       }
     }
 
-    // If a specific billing cycle is selected and found in billingCycles, use that
-    if (selectedBillingCycleKey) {
-      const selectedCycle = billingCycles.find((c) => c.key === selectedBillingCycleKey)
-      if (selectedCycle) {
-        const inCycle = sortReadings(
-          sortedReadings.filter((reading) => {
-            const date = dayjs(reading.date)
-            return (
-              (date.isSame(dayjs(selectedCycle.start)) ||
-                date.isAfter(dayjs(selectedCycle.start))) &&
-              (date.isSame(dayjs(selectedCycle.end)) ||
-                date.isBefore(dayjs(selectedCycle.end)))
-            )
-          }),
-        )
+    const buildTrackerFromCycle = (cycle: BillingCycleSummary) => {
+      const inCycle = sortReadings(
+        sortedReadings.filter((reading) => {
+          const date = dayjs(reading.date)
+          return (
+            (date.isSame(dayjs(cycle.start)) || date.isAfter(dayjs(cycle.start))) &&
+            (date.isSame(dayjs(cycle.end)) || date.isBefore(dayjs(cycle.end)))
+          )
+        }),
+      )
 
-        const first = inCycle[0]
-        const last = inCycle[inCycle.length - 1]
+      const first = inCycle[0]
+      const last = inCycle[inCycle.length - 1]
+      const billAnchorReading = [...inCycle]
+        .reverse()
+        .find((reading) => (reading.note ?? '').toLowerCase().includes('kseb bill'))
 
-        let importConsumed = 0
-        let exportConsumed = 0
-        let solarAdded = 0
+      let importConsumed = 0
+      let exportConsumed = 0
+      let solarAdded = 0
 
-        if (first && last && inCycle.length > 1) {
-          importConsumed = calculateImportTotal(last) - calculateImportTotal(first)
-          exportConsumed = calculateExportTotal(last) - calculateExportTotal(first)
-          solarAdded = last.solarGenerated - first.solarGenerated
-        }
+      if (first && last && inCycle.length > 1) {
+        importConsumed = calculateImportTotal(last) - calculateImportTotal(first)
+        exportConsumed = calculateExportTotal(last) - calculateExportTotal(first)
+        solarAdded = last.solarGenerated - first.solarGenerated
+      }
 
-        const netConsumed = importConsumed - exportConsumed
+      const netConsumed = importConsumed - exportConsumed
+      let openingBank = billAnchorReading ? Math.max(0, -calculateNet(billAnchorReading)) : cycle.openingBank
+      let bankUsed = 0
+      let bankAdded = 0
+      let payableUnits = 0
 
-        return {
-          periodLabel: `${dayjs(selectedCycle.start).format('DD MMM YYYY')} - ${dayjs(selectedCycle.end).format('DD MMM YYYY')}`,
-          readingsCount: inCycle.length,
-          importConsumed,
-          exportConsumed,
-          netConsumed,
-          solarAdded,
-          openingBank: selectedCycle.openingBank,
-          bankUsed: selectedCycle.bankUsed,
-          bankAdded: selectedCycle.bankAdded,
-          payableUnits: selectedCycle.payableUnits,
-          closingBank: selectedCycle.closingBank,
-          remainingBank: selectedCycle.closingBank,
-          totalImport: last ? calculateImportTotal(last) : 0,
-          totalExport: last ? calculateExportTotal(last) : 0,
-          totalNet: last ? calculateNet(last) : 0,
-          totalSolar: last ? last.solarGenerated : 0,
-        }
+      if (netConsumed >= 0) {
+        bankUsed = Math.min(openingBank, netConsumed)
+        payableUnits = netConsumed - bankUsed
+      } else {
+        bankAdded = Math.abs(netConsumed)
+      }
+
+      const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
+
+      return {
+        periodLabel: `${dayjs(cycle.start).format('DD MMM YYYY')} - ${dayjs(cycle.end).format('DD MMM YYYY')}`,
+        readingsCount: inCycle.length,
+        importConsumed,
+        exportConsumed,
+        netConsumed,
+        solarAdded,
+        openingBank,
+        bankUsed,
+        bankAdded,
+        payableUnits,
+        closingBank,
+        remainingBank: closingBank,
+        totalImport: last ? calculateImportTotal(last) : 0,
+        totalExport: last ? calculateExportTotal(last) : 0,
+        totalNet: last ? calculateNet(last) : 0,
+        totalSolar: last ? last.solarGenerated : 0,
       }
     }
 
-    // Default: use current month based on latest reading
-    const bounds = getCycleBoundaries(latest.date, billingDay)
-    const inCycle = sortReadings(
-      sortedReadings.filter((reading) => {
-        const date = dayjs(reading.date)
-        return (
-          (date.isSame(dayjs(bounds.start)) || date.isAfter(dayjs(bounds.start))) &&
-          (date.isSame(dayjs(bounds.end)) || date.isBefore(dayjs(bounds.end)))
-        )
-      }),
-    )
-
-    const first = inCycle[0]
-    const last = inCycle[inCycle.length - 1]
-
-    let importConsumed = 0
-    let exportConsumed = 0
-    let solarAdded = 0
-
-    if (first && last && inCycle.length > 1) {
-      importConsumed = calculateImportTotal(last) - calculateImportTotal(first)
-      exportConsumed = calculateExportTotal(last) - calculateExportTotal(first)
-      solarAdded = last.solarGenerated - first.solarGenerated
+    // If a specific billing cycle is selected and found in billingCycles, use that.
+    if (selectedBillingCycleKey) {
+      const selectedCycle = billingCycles.find((c) => c.key === selectedBillingCycleKey)
+      if (selectedCycle) {
+        return buildTrackerFromCycle(selectedCycle)
+      }
     }
 
-    const netConsumed = importConsumed - exportConsumed
-    const openingBank = first ? Math.max(0, -calculateNet(first)) : 0
-    const payableUnits = Math.max(netConsumed - openingBank, 0)
-    const remainingBank = Math.max(openingBank - netConsumed, 0)
+    // Default: use the cycle that contains today's date, not just the latest reading date.
+    const todayCycleBounds = getCycleBoundaries(dayjs().format('YYYY-MM-DD'), billingDay)
+    const todayCycle = billingCycles.find((c) => c.key === todayCycleBounds.key)
+    if (todayCycle) {
+      return buildTrackerFromCycle(todayCycle)
+    }
 
-    // Get the current month's cycle data from billingCycles if available
-    const currentCycle = billingCycles.find((c) => c.key === bounds.key)
-    const bankUsed = currentCycle?.bankUsed ?? 0
-    const bankAdded = currentCycle?.bankAdded ?? 0
-    const closingBank = currentCycle?.closingBank ?? remainingBank
+    // Fallback for sparse data: use latest reading cycle.
+    const latestCycleBounds = getCycleBoundaries(latest.date, billingDay)
+    const latestCycle = billingCycles.find((c) => c.key === latestCycleBounds.key)
+    if (latestCycle) {
+      return buildTrackerFromCycle(latestCycle)
+    }
 
     return {
-      periodLabel: `${dayjs(bounds.start).format('DD MMM YYYY')} - ${dayjs(bounds.end).format('DD MMM YYYY')}`,
-      readingsCount: inCycle.length,
-      importConsumed,
-      exportConsumed,
-      netConsumed,
-      solarAdded,
-      openingBank,
-      bankUsed,
-      bankAdded,
-      payableUnits,
-      closingBank,
-      remainingBank,
+      periodLabel: `${dayjs(latestCycleBounds.start).format('DD MMM YYYY')} - ${dayjs(latestCycleBounds.end).format('DD MMM YYYY')}`,
+      readingsCount: 0,
+      importConsumed: 0,
+      exportConsumed: 0,
+      netConsumed: 0,
+      solarAdded: 0,
+      openingBank: 0,
+      bankUsed: 0,
+      bankAdded: 0,
+      payableUnits: 0,
+      closingBank: 0,
+      remainingBank: 0,
       totalImport: calculateImportTotal(latest),
       totalExport: calculateExportTotal(latest),
       totalNet: calculateNet(latest),
@@ -2495,6 +2618,29 @@ function App() {
   const currentBank = billingCycles.length
     ? billingCycles[billingCycles.length - 1].closingBank
     : 0
+
+  const latestKsebBillReading = useMemo(() => {
+    if (ksebBillSnapshot) {
+      return {
+        id: `kseb-${ksebBillSnapshot.date}T${ksebBillSnapshot.time}`,
+        date: ksebBillSnapshot.date,
+        time: ksebBillSnapshot.time,
+        importT: ksebBillSnapshot.importTotal,
+        importT1: ksebBillSnapshot.importTotal,
+        importT2: 0,
+        importT3: 0,
+        exportT: ksebBillSnapshot.exportTotal,
+        exportT1: ksebBillSnapshot.exportTotal,
+        exportT2: 0,
+        exportT3: 0,
+        net: ksebBillSnapshot.net,
+        solarGenerated: ksebBillSnapshot.solarGenerated,
+        note: 'KSEB Bill entry',
+      } satisfies Reading
+    }
+
+    return findLatestKsebBillReading(sortedReadings)
+  }, [ksebBillSnapshot, sortedReadings])
 
   const selectedCycle = useMemo(() => {
     if (!billingCycles.length) {
@@ -3126,6 +3272,14 @@ function App() {
     setEodSolarNoteInput(todaySolarSummary.note ?? '')
   }, [todaySolarSummary, meterDerivedSolarToday, eodSolarTotalInput])
 
+  const openSolarLogModal = () => {
+    setSolarLogDate(dayjs().format('YYYY-MM-DD'))
+    setSolarLogTime(defaultReadingTime())
+    setSolarLogValue('')
+    setSolarLogNote('')
+    setIsSolarLogModalOpen(true)
+  }
+
   const saveSolarUsageLog = () => {
     const value = Number(solarLogValue)
     if (!Number.isFinite(value) || value <= 0) {
@@ -3133,26 +3287,286 @@ function App() {
       return
     }
 
+    const logMoment = dayjs(`${solarLogDate}T${solarLogTime || '00:00'}`)
+    if (!logMoment.isValid()) {
+      setAppToast('Enter a valid date and time for solar log.')
+      return
+    }
+
     const entry: SolarUsageEntry = {
       id: createReadingId(),
-      timestamp: new Date().toISOString(),
+      timestamp: logMoment.toISOString(),
       value,
       note: solarLogNote.trim() || undefined,
     }
 
     const nextSolarLogs = [entry, ...solarUsageLogs].slice(0, 300)
     setSolarUsageLogs(nextSolarLogs)
+    setSolarLogDate(dayjs().format('YYYY-MM-DD'))
+    setSolarLogTime(defaultReadingTime())
     setSolarLogValue('')
     setSolarLogNote('')
     setIsSolarLogModalOpen(false)
     markLocalChange()
     setAppToast('Solar usage logged.')
-    logActivity('add-solar-log', `${value.toFixed(2)} kWh`)
+    logActivity('add-solar-log', `${value.toFixed(2)} kWh at ${logMoment.format('DD MMM YYYY HH:mm')}`)
 
     if (supabase && cloudUser) {
       void pushToCloud(sortedReadings, true, nextSolarLogs, solarDailySummaries)
     }
   }
+
+  const openBulkSolarModal = () => {
+    setBulkSolarRows([createBulkSolarSummaryRow()])
+    setBulkSolarErrors([])
+    setIsBulkSolarModalOpen(true)
+  }
+
+  const updateBulkSolarRow = (
+    rowId: string,
+    field: keyof Omit<BulkSolarSummaryFormRow, 'id'>,
+    value: string,
+  ) => {
+    setBulkSolarRows((prev) =>
+      prev.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)),
+    )
+  }
+
+  const appendBulkSolarRow = () => {
+    setBulkSolarRows((prev) => {
+      const lastRow = prev[prev.length - 1]
+      return [...prev, createBulkSolarSummaryRow(lastRow)]
+    })
+  }
+
+  const removeBulkSolarRow = (rowId: string) => {
+    setBulkSolarRows((prev) => (prev.length <= 1 ? prev : prev.filter((row) => row.id !== rowId)))
+  }
+
+  const resetBulkSolarRows = () => {
+    setBulkSolarRows([createBulkSolarSummaryRow()])
+    setBulkSolarErrors([])
+  }
+
+  const saveBulkSolarEntries = () => {
+    const errors: string[] = []
+    const seenDates = new Set<string>()
+
+    bulkSolarRows.forEach((row, index) => {
+      const rowLabel = `Row ${index + 1}`
+
+      if (!row.date.trim()) {
+        errors.push(`${rowLabel}: date is required.`)
+      }
+
+      if (!row.time.trim()) {
+        errors.push(`${rowLabel}: time is required.`)
+      }
+
+      const rowMoment = dayjs(`${row.date}T${row.time || '00:00'}`)
+      if (!rowMoment.isValid()) {
+        errors.push(`${rowLabel}: please enter a valid date and time.`)
+      }
+
+      if (row.total.trim() === '') {
+        errors.push(`${rowLabel}: solar total is required.`)
+      }
+
+      const total = Number(row.total)
+      if (row.total.trim() !== '' && (!Number.isFinite(total) || total < 0)) {
+        errors.push(`${rowLabel}: solar total must be zero or higher.`)
+      }
+
+      if (row.date.trim()) {
+        if (seenDates.has(row.date)) {
+          errors.push(`${rowLabel}: each row must use a unique date.`)
+        } else {
+          seenDates.add(row.date)
+        }
+      }
+    })
+
+    if (errors.length > 0) {
+      setBulkSolarErrors(errors)
+      setAppToast('Please fix the bulk solar rows before saving.')
+      return
+    }
+
+    const updatedByDate = new Map(solarDailySummaries.map((entry) => [entry.date, entry]))
+
+    for (const row of bulkSolarRows) {
+      const rowMoment = dayjs(`${row.date}T${row.time}`)
+      updatedByDate.set(row.date, {
+        date: row.date,
+        total: Number(row.total),
+        note: row.note.trim() || undefined,
+        updatedAt: rowMoment.isValid() ? rowMoment.toISOString() : new Date().toISOString(),
+      })
+    }
+
+    const nextSummaries = [...updatedByDate.values()]
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(0, 120)
+
+    setSolarDailySummaries(nextSummaries)
+    setBulkSolarErrors([])
+    setIsBulkSolarModalOpen(false)
+    markLocalChange()
+    setAppToast(`Saved ${bulkSolarRows.length} solar day${bulkSolarRows.length === 1 ? '' : 's'}.`)
+    logActivity('bulk-solar-entry', `Saved ${bulkSolarRows.length} solar rows`)
+
+    if (supabase && cloudUser) {
+      void pushToCloud(sortedReadings, true, solarUsageLogs, nextSummaries)
+    }
+  }
+
+  const openBulkMeterModal = () => {
+    setBulkMeterRows([createBulkMeterRow()])
+    setBulkMeterErrors([])
+    setIsBulkMeterModalOpen(true)
+  }
+
+  const updateBulkMeterRow = (
+    rowId: string,
+    field: keyof Omit<BulkMeterFormRow, 'id'>,
+    value: string,
+  ) => {
+    setBulkMeterRows((prev) =>
+      prev.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)),
+    )
+  }
+
+  const appendBulkMeterRow = () => {
+    setBulkMeterRows((prev) => {
+      const lastRow = prev[prev.length - 1]
+      return [...prev, createBulkMeterRow(lastRow)]
+    })
+  }
+
+  const removeBulkMeterRow = (rowId: string) => {
+    setBulkMeterRows((prev) => (prev.length <= 1 ? prev : prev.filter((row) => row.id !== rowId)))
+  }
+
+  const resetBulkMeterRows = () => {
+    setBulkMeterRows([createBulkMeterRow()])
+    setBulkMeterErrors([])
+  }
+
+  const saveBulkMeterEntries = () => {
+    const errors: string[] = []
+    const seenDateTimes = new Set<string>()
+
+    bulkMeterRows.forEach((row, index) => {
+      const rowLabel = `Row ${index + 1}`
+      const key = `${row.date}T${row.time}`
+
+      if (!row.date.trim()) {
+        errors.push(`${rowLabel}: date is required.`)
+      }
+
+      if (!row.time.trim()) {
+        errors.push(`${rowLabel}: time is required.`)
+      }
+
+      const rowMoment = dayjs(`${row.date}T${row.time || '00:00'}`)
+      if (!rowMoment.isValid()) {
+        errors.push(`${rowLabel}: enter a valid date and time.`)
+      }
+
+      if (!row.importTotal.trim()) {
+        errors.push(`${rowLabel}: import total is required.`)
+      }
+
+      if (!row.exportTotal.trim()) {
+        errors.push(`${rowLabel}: export total is required.`)
+      }
+
+      const importTotal = Number(row.importTotal)
+      const exportTotal = Number(row.exportTotal)
+      const solarGenerated = Number(row.solarGenerated || '0')
+
+      if (row.importTotal.trim() && (!Number.isFinite(importTotal) || importTotal < 0)) {
+        errors.push(`${rowLabel}: import total must be zero or higher.`)
+      }
+
+      if (row.exportTotal.trim() && (!Number.isFinite(exportTotal) || exportTotal < 0)) {
+        errors.push(`${rowLabel}: export total must be zero or higher.`)
+      }
+
+      if (row.solarGenerated.trim() && (!Number.isFinite(solarGenerated) || solarGenerated < 0)) {
+        errors.push(`${rowLabel}: solar generated must be zero or higher.`)
+      }
+
+      if (row.date.trim() && row.time.trim()) {
+        if (seenDateTimes.has(key)) {
+          errors.push(`${rowLabel}: each row must have a unique date and time.`)
+        } else {
+          seenDateTimes.add(key)
+        }
+      }
+    })
+
+    if (errors.length > 0) {
+      setBulkMeterErrors(errors)
+      setAppToast('Please fix the bulk meter rows before saving.')
+      return
+    }
+
+    const byDateTime = new Map(readings.map((reading) => [`${reading.date}T${reading.time}`, reading]))
+
+    for (const row of bulkMeterRows) {
+      const key = `${row.date}T${row.time}`
+      const importTotal = Number(row.importTotal)
+      const exportTotal = Number(row.exportTotal)
+      const solarGenerated = row.solarGenerated.trim() ? Number(row.solarGenerated) : 0
+      const existing = byDateTime.get(key)
+
+      byDateTime.set(key, {
+        id: existing?.id ?? createReadingId(),
+        date: row.date,
+        time: row.time,
+        importT: importTotal,
+        importT1: importTotal,
+        importT2: 0,
+        importT3: 0,
+        exportT: exportTotal,
+        exportT1: exportTotal,
+        exportT2: 0,
+        exportT3: 0,
+        net: importTotal - exportTotal,
+        solarGenerated,
+        note: row.note.trim() || existing?.note || 'Bulk meter entry',
+      })
+    }
+
+    const nextReadings = sortReadings([...byDateTime.values()])
+    setReadings(nextReadings)
+    setBulkMeterErrors([])
+    setIsBulkMeterModalOpen(false)
+    markLocalChange()
+    setAppToast(`Saved ${bulkMeterRows.length} meter row${bulkMeterRows.length === 1 ? '' : 's'}.`)
+    logActivity('bulk-meter-entry', `Saved ${bulkMeterRows.length} meter rows`)
+
+    if (supabase && cloudUser) {
+      void pushToCloud(nextReadings, true)
+    }
+  }
+
+  useEffect(() => {
+    if (!isBulkMeterModalOpen || bulkMeterRows.length === 0) {
+      return
+    }
+
+    const latestRow = bulkMeterRows[bulkMeterRows.length - 1]
+    const scrollTimer = window.setTimeout(() => {
+      const rowElement = document.getElementById(`bulk-meter-row-${latestRow.id}`)
+      rowElement?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 40)
+
+    return () => {
+      window.clearTimeout(scrollTimer)
+    }
+  }, [bulkMeterRows.length, isBulkMeterModalOpen])
 
   const saveEndOfDaySolarTotal = () => {
     const total = Number(eodSolarTotalInput)
@@ -3377,6 +3791,109 @@ function App() {
     setCustomStart(cycle.start)
     setCustomEnd(cycle.end)
     setAppToast(`Billing cycle updated from bill date (${dayjs(billingReferenceDate).format('DD MMM YYYY')}).`)
+  }
+
+  const saveKsebBillDetails = () => {
+    const importTotal = Number(ksebBillImportInput)
+    const exportTotal = Number(ksebBillExportInput)
+    const explicitNet = ksebBillNetInput.trim() === '' ? undefined : Number(ksebBillNetInput)
+    const explicitSolar =
+      ksebBillSolarInput.trim() === '' ? undefined : Number(ksebBillSolarInput)
+
+    if (!ksebBillEntryDate.trim() || !ksebBillEntryTime.trim()) {
+      setAppToast('Enter bill date and time.')
+      return
+    }
+
+    const timestamp = dayjs(`${ksebBillEntryDate}T${ksebBillEntryTime}`)
+    if (!timestamp.isValid()) {
+      setAppToast('Enter a valid bill date and time.')
+      return
+    }
+
+    if (!Number.isFinite(importTotal) || importTotal < 0) {
+      setAppToast('Enter a valid import total from the bill.')
+      return
+    }
+
+    if (!Number.isFinite(exportTotal) || exportTotal < 0) {
+      setAppToast('Enter a valid export total from the bill.')
+      return
+    }
+
+    if (explicitNet !== undefined && !Number.isFinite(explicitNet)) {
+      setAppToast('Net should be a valid number if entered.')
+      return
+    }
+
+    if (explicitSolar !== undefined && (!Number.isFinite(explicitSolar) || explicitSolar < 0)) {
+      setAppToast('Generated solar should be zero or higher if entered.')
+      return
+    }
+
+    const previousSolar = (() => {
+      const previous = [...sortedReadings]
+        .filter((reading) => getReadingTimestamp(reading) <= timestamp.valueOf())
+        .sort((a, b) => getReadingTimestamp(b) - getReadingTimestamp(a))[0]
+      return previous?.solarGenerated ?? 0
+    })()
+
+    const note = 'KSEB Bill entry'
+
+    const existingAtSameMoment = readings.find(
+      (reading) => reading.date === ksebBillEntryDate && reading.time === ksebBillEntryTime,
+    )
+
+    const ksebReading: Reading = {
+      id: existingAtSameMoment?.id ?? createReadingId(),
+      date: ksebBillEntryDate,
+      time: ksebBillEntryTime,
+      importT: importTotal,
+      importT1: importTotal,
+      importT2: 0,
+      importT3: 0,
+      exportT: exportTotal,
+      exportT1: exportTotal,
+      exportT2: 0,
+      exportT3: 0,
+      net: explicitNet ?? importTotal - exportTotal,
+      solarGenerated: explicitSolar ?? previousSolar,
+      note,
+    }
+
+    const nextKsebSnapshot: KsebBillSnapshot = {
+      date: ksebBillEntryDate,
+      time: ksebBillEntryTime,
+      importTotal,
+      exportTotal,
+      net: explicitNet ?? importTotal - exportTotal,
+      solarGenerated: explicitSolar ?? previousSolar,
+      updatedAt: timestamp.toISOString(),
+    }
+
+    saveRecoverySnapshot(readings)
+
+    const nextReadings = sortReadings(
+      existingAtSameMoment
+        ? readings.map((reading) =>
+            reading.id === existingAtSameMoment.id ? ksebReading : reading,
+          )
+        : [...readings, ksebReading],
+    )
+
+    setReadings(nextReadings)
+    setKsebBillSnapshot(nextKsebSnapshot)
+    setBillingReferenceDate(ksebBillEntryDate)
+    setBillGeneratedAt(`${ksebBillEntryDate}T${ksebBillEntryTime}`)
+    setKsebBillSolarInput('')
+    applyBillingDateToCycle(ksebBillEntryDate)
+    markLocalChange()
+    setAppToast('KSEB bill details saved and billing cycle applied.')
+    logActivity('save-kseb-bill', `${ksebBillEntryDate} ${ksebBillEntryTime}`)
+
+    if (supabase && cloudUser) {
+      void pushToCloud(nextReadings, true)
+    }
   }
 
   const applyBillingDateToCycle = (date: string) => {
@@ -4394,7 +4911,7 @@ function App() {
           <button
             type="button"
             className="quick-add-button quick-add-button-secondary"
-            onClick={() => setIsSolarLogModalOpen(true)}
+            onClick={openSolarLogModal}
           >
             + Log Solar
           </button>
@@ -4423,6 +4940,25 @@ function App() {
         <article className="card kpi accent">
           <h2>Current Bank</h2>
           <p>{formatUnits(currentBank)}</p>
+        </article>
+        <article className="card kpi">
+          <h2>Last KSEB Reading</h2>
+          {latestKsebBillReading ? (
+            <>
+              <p>
+                {dayjs(`${latestKsebBillReading.date}T${latestKsebBillReading.time}`).format(
+                  'DD MMM YYYY',
+                )}
+              </p>
+              <p className="field-hint">
+                IMP {calculateImportTotal(latestKsebBillReading).toFixed(2)} | EXP{' '}
+                {calculateExportTotal(latestKsebBillReading).toFixed(2)} | NET{' '}
+                {calculateNet(latestKsebBillReading).toFixed(2)}
+              </p>
+            </>
+          ) : (
+            <p className="field-hint">No KSEB bill saved yet.</p>
+          )}
         </article>
       </section>
 
@@ -4482,6 +5018,20 @@ function App() {
           <button type="button" onClick={restoreLastBackup} className="ghost">
             Restore Last Backup
           </button>
+          <button
+            type="button"
+            className="manage-bulk-button manage-bulk-meter-button"
+            onClick={openBulkMeterModal}
+          >
+            Bulk Meter Entry
+          </button>
+          <button
+            type="button"
+            className="manage-bulk-button manage-bulk-solar-button"
+            onClick={openBulkSolarModal}
+          >
+            Bulk Solar Entry
+          </button>
         </div>
         {lastDeletedReading && (
           <div className="inline-actions">
@@ -4512,6 +5062,111 @@ function App() {
             : billImportMessage ||
               'Upload a KSEB bill and the app will detect date/import/export values, then pre-fill meter reading form for review.'}
         </p>
+
+        <section className="kseb-bill-section">
+          <div className="section-head">
+            <h3>Last KSEB Bill Reading</h3>
+            <p className="field-hint" style={{ margin: 0 }}>
+              Saved with note: KSEB Bill entry
+            </p>
+          </div>
+
+          {latestKsebBillReading ? (
+            <div className="tracker-metrics">
+              <div>
+                <span>Date and Time</span>
+                <strong>
+                  {dayjs(`${latestKsebBillReading.date}T${latestKsebBillReading.time}`).format(
+                    'DD MMM YYYY HH:mm',
+                  )}
+                </strong>
+              </div>
+              <div>
+                <span>Import Total</span>
+                <strong>{formatUnits(calculateImportTotal(latestKsebBillReading))}</strong>
+              </div>
+              <div>
+                <span>Export Total</span>
+                <strong>{formatUnits(calculateExportTotal(latestKsebBillReading))}</strong>
+              </div>
+              <div>
+                <span>Net</span>
+                <strong>{formatUnits(calculateNet(latestKsebBillReading))}</strong>
+              </div>
+              <div>
+                <span>Generated Solar</span>
+                <strong>{formatUnits(latestKsebBillReading.solarGenerated)}</strong>
+              </div>
+            </div>
+          ) : (
+            <p className="field-hint">No KSEB bill reading saved yet.</p>
+          )}
+
+          <div className="controls-row kseb-bill-form-grid">
+            <label>
+              Bill Date
+              <input
+                type="date"
+                value={ksebBillEntryDate}
+                onChange={(event) => setKsebBillEntryDate(event.target.value)}
+              />
+            </label>
+            <label>
+              Bill Time
+              <input
+                type="time"
+                value={ksebBillEntryTime}
+                onChange={(event) => setKsebBillEntryTime(event.target.value)}
+              />
+            </label>
+            <label>
+              Import Total (T)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={ksebBillImportInput}
+                onChange={(event) => setKsebBillImportInput(event.target.value)}
+                placeholder="e.g. 63"
+              />
+            </label>
+            <label>
+              Export Total (T)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={ksebBillExportInput}
+                onChange={(event) => setKsebBillExportInput(event.target.value)}
+                placeholder="e.g. 71"
+              />
+            </label>
+            <label>
+              Net (optional)
+              <input
+                type="number"
+                step="0.01"
+                value={ksebBillNetInput}
+                onChange={(event) => setKsebBillNetInput(event.target.value)}
+                placeholder="Auto = Import - Export"
+              />
+            </label>
+            <label>
+              Generated Solar (optional)
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={ksebBillSolarInput}
+                onChange={(event) => setKsebBillSolarInput(event.target.value)}
+                placeholder="Carry forward if blank"
+              />
+            </label>
+            <button type="button" onClick={saveKsebBillDetails}>
+              Save Bill Details
+            </button>
+          </div>
+        </section>
       </section>
 
       )}
@@ -4752,8 +5407,49 @@ function App() {
 
       <section className="card">
         <div className="section-head">
+          <h2>Last KSEB Bill Reading</h2>
+          <button type="button" className="ghost" onClick={() => setActiveTab('manage')}>
+            Update In Manage
+          </button>
+        </div>
+        {latestKsebBillReading ? (
+          <div className="tracker-metrics">
+            <div>
+              <span>Date and Time</span>
+              <strong>
+                {dayjs(`${latestKsebBillReading.date}T${latestKsebBillReading.time}`).format(
+                  'DD MMM YYYY HH:mm',
+                )}
+              </strong>
+            </div>
+            <div>
+              <span>Import Total</span>
+              <strong>{formatUnits(calculateImportTotal(latestKsebBillReading))}</strong>
+            </div>
+            <div>
+              <span>Export Total</span>
+              <strong>{formatUnits(calculateExportTotal(latestKsebBillReading))}</strong>
+            </div>
+            <div>
+              <span>Net</span>
+              <strong>{formatUnits(calculateNet(latestKsebBillReading))}</strong>
+            </div>
+            <div>
+              <span>Generated Solar</span>
+              <strong>{formatUnits(latestKsebBillReading.solarGenerated)}</strong>
+            </div>
+          </div>
+        ) : (
+          <p className="field-hint">
+            No KSEB bill reading saved yet. Open Manage tab and save bill details.
+          </p>
+        )}
+      </section>
+
+      <section className="card">
+        <div className="section-head">
           <h2>Solar Production Tracker</h2>
-          <button type="button" className="ghost" onClick={() => setIsSolarLogModalOpen(true)}>
+          <button type="button" className="ghost" onClick={openSolarLogModal}>
             Log Solar Usage
           </button>
         </div>
@@ -5012,13 +5708,13 @@ function App() {
           <button type="button" onClick={openAddReadingModal}>
             Log Meter Reading
           </button>
-          <button type="button" className="ghost" onClick={() => setIsSolarLogModalOpen(true)}>
+          <button type="button" className="ghost" onClick={openSolarLogModal}>
             Log Solar Usage
           </button>
         </div>
         <p className="field-hint">
-          Use Meter Reading for cumulative meter snapshots, and Solar Usage for multiple
-          intraday generation logs.
+          Use Meter Reading for cumulative meter snapshots and Solar Usage for intraday logs.
+          Bulk Meter and Bulk Solar entry are available in Manage tab.
         </p>
       </section>
 
@@ -5229,8 +5925,43 @@ function App() {
               </button>
             </div>
 
+            <p className="field-hint solar-log-subtitle">
+              Enter the solar value from your app and choose the reading date/time.
+            </p>
+
+            <div className="inline-actions solar-log-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setSolarLogDate(dayjs().format('YYYY-MM-DD'))
+                  setSolarLogTime(defaultReadingTime())
+                }}
+              >
+                Use Current Date/Time
+              </button>
+            </div>
+
             <div className="reading-form solar-log-form">
-              <label>
+              <label className="solar-log-date-field">
+                Date
+                <input
+                  type="date"
+                  value={solarLogDate}
+                  onChange={(event) => setSolarLogDate(event.target.value)}
+                  required
+                />
+              </label>
+              <label className="solar-log-time-field">
+                Time
+                <input
+                  type="time"
+                  value={solarLogTime}
+                  onChange={(event) => setSolarLogTime(event.target.value)}
+                  required
+                />
+              </label>
+              <label className="solar-log-value-field">
                 Current Solar Reading Till Now (kWh)
                 <input
                   type="number"
@@ -5254,6 +5985,240 @@ function App() {
             <div className="inline-actions">
               <button type="button" onClick={saveSolarUsageLog}>
                 Save Solar Log
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {isBulkSolarModalOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Bulk solar entry">
+          <section className="modal-sheet bulk-solar-sheet">
+            <div className="section-head">
+              <div>
+                <h2>Bulk Solar Entry</h2>
+                <p className="field-hint">
+                  Add historical daily solar totals row by row. Each added row starts on the next day.
+                </p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setIsBulkSolarModalOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="inline-actions bulk-solar-actions">
+              <button type="button" onClick={appendBulkSolarRow}>
+                Add Next Row
+              </button>
+              <button type="button" className="ghost" onClick={resetBulkSolarRows}>
+                Reset Rows
+              </button>
+            </div>
+
+            {bulkSolarErrors.length > 0 && (
+              <div className="form-errors" role="alert">
+                {bulkSolarErrors.map((error) => (
+                  <p key={error}>{error}</p>
+                ))}
+              </div>
+            )}
+
+            <div className="bulk-solar-list">
+              {bulkSolarRows.map((row, index) => (
+                <article key={row.id} className="bulk-solar-row">
+                  <div className="section-head bulk-solar-row-head">
+                    <h3>Row {index + 1}</h3>
+                    <button
+                      type="button"
+                      className="ghost danger"
+                      onClick={() => removeBulkSolarRow(row.id)}
+                      disabled={bulkSolarRows.length === 1}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <div className="reading-form bulk-solar-form">
+                    <label>
+                      Date
+                      <input
+                        type="date"
+                        value={row.date}
+                        onChange={(event) => updateBulkSolarRow(row.id, 'date', event.target.value)}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Time
+                      <input
+                        type="time"
+                        value={row.time}
+                        onChange={(event) => updateBulkSolarRow(row.id, 'time', event.target.value)}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Solar Produced (kWh)
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={row.total}
+                        onChange={(event) => updateBulkSolarRow(row.id, 'total', event.target.value)}
+                        placeholder="e.g. 12.4"
+                        required
+                      />
+                    </label>
+                    <label className="note-field">
+                      Note
+                      <textarea
+                        value={row.note}
+                        onChange={(event) => updateBulkSolarRow(row.id, 'note', event.target.value)}
+                        placeholder="Optional note for this day"
+                      />
+                    </label>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="inline-actions bulk-solar-save-actions bulk-solar-sticky-bar">
+              <button type="button" className="ghost" onClick={appendBulkSolarRow}>
+                Add Next Row
+              </button>
+              <button type="button" onClick={saveBulkSolarEntries}>
+                Save Bulk Solar Entries
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {isBulkMeterModalOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Bulk meter entry">
+          <section className="modal-sheet bulk-meter-sheet">
+            <div className="section-head">
+              <div>
+                <h2>Bulk Meter Entry</h2>
+                <p className="field-hint">
+                  Add historical meter snapshots row by row. Each added row starts on the next day.
+                </p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setIsBulkMeterModalOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div className="inline-actions bulk-meter-actions">
+              <button type="button" onClick={appendBulkMeterRow}>
+                Add Next Row
+              </button>
+              <button type="button" className="ghost" onClick={resetBulkMeterRows}>
+                Reset Rows
+              </button>
+            </div>
+
+            {bulkMeterErrors.length > 0 && (
+              <div className="form-errors" role="alert">
+                {bulkMeterErrors.map((error) => (
+                  <p key={error}>{error}</p>
+                ))}
+              </div>
+            )}
+
+            <div className="bulk-meter-list">
+              {bulkMeterRows.map((row, index) => (
+                <article id={`bulk-meter-row-${row.id}`} key={row.id} className="bulk-meter-row">
+                  <div className="section-head bulk-meter-row-head">
+                    <h3>Row {index + 1}</h3>
+                    <button
+                      type="button"
+                      className="ghost danger"
+                      onClick={() => removeBulkMeterRow(row.id)}
+                      disabled={bulkMeterRows.length === 1}
+                    >
+                      Remove
+                    </button>
+                  </div>
+
+                  <div className="reading-form bulk-meter-form">
+                    <label>
+                      Date
+                      <input
+                        type="date"
+                        value={row.date}
+                        onChange={(event) => updateBulkMeterRow(row.id, 'date', event.target.value)}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Time
+                      <input
+                        type="time"
+                        value={row.time}
+                        onChange={(event) => updateBulkMeterRow(row.id, 'time', event.target.value)}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Import Total (T)
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={row.importTotal}
+                        onChange={(event) =>
+                          updateBulkMeterRow(row.id, 'importTotal', event.target.value)
+                        }
+                        placeholder="e.g. 163"
+                        required
+                      />
+                    </label>
+                    <label>
+                      Export Total (T)
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={row.exportTotal}
+                        onChange={(event) =>
+                          updateBulkMeterRow(row.id, 'exportTotal', event.target.value)
+                        }
+                        placeholder="e.g. 153"
+                        required
+                      />
+                    </label>
+                    <label>
+                      Solar Generated
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={row.solarGenerated}
+                        onChange={(event) =>
+                          updateBulkMeterRow(row.id, 'solarGenerated', event.target.value)
+                        }
+                        placeholder="e.g. 232"
+                      />
+                    </label>
+                    <label className="note-field">
+                      Note
+                      <textarea
+                        value={row.note}
+                        onChange={(event) => updateBulkMeterRow(row.id, 'note', event.target.value)}
+                        placeholder="Optional note for this meter row"
+                      />
+                    </label>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="inline-actions bulk-meter-save-actions bulk-meter-sticky-bar">
+              <button type="button" className="ghost" onClick={appendBulkMeterRow}>
+                Add Next Row
+              </button>
+              <button type="button" onClick={saveBulkMeterEntries}>
+                Save Bulk Meter Entries
               </button>
             </div>
           </section>
@@ -6127,7 +7092,7 @@ function App() {
       <button
         type="button"
         className="fab-solar-log"
-        onClick={() => setIsSolarLogModalOpen(true)}
+        onClick={openSolarLogModal}
       >
         + Solar
       </button>
