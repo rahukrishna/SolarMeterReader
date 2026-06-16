@@ -2532,14 +2532,57 @@ function App() {
       let exportConsumed = 0
       let solarAdded = 0
 
-      if (first && last && inCycle.length > 1) {
-        importConsumed = calculateImportTotal(last) - calculateImportTotal(first)
-        exportConsumed = calculateExportTotal(last) - calculateExportTotal(first)
-        solarAdded = last.solarGenerated - first.solarGenerated
+      // Use KSEB bill snapshot if it exists in this cycle, otherwise search for reading with note
+      let effectiveBillReading = billAnchorReading
+      if (!effectiveBillReading && ksebBillSnapshot) {
+        const billDate = ksebBillSnapshot.date
+        const billInCycle = (
+          (dayjs(billDate).isSame(dayjs(cycle.start)) || dayjs(billDate).isAfter(dayjs(cycle.start))) &&
+          (dayjs(billDate).isSame(dayjs(cycle.end)) || dayjs(billDate).isBefore(dayjs(cycle.end)))
+        )
+        if (billInCycle) {
+          // Create a reading object from ksebBillSnapshot to use as reference
+          effectiveBillReading = {
+            id: `kseb-snapshot-${billDate}`,
+            date: billDate,
+            time: ksebBillSnapshot.time,
+            importT: ksebBillSnapshot.importTotal,
+            importT1: ksebBillSnapshot.importTotal,
+            importT2: 0,
+            importT3: 0,
+            exportT: ksebBillSnapshot.exportTotal,
+            exportT1: ksebBillSnapshot.exportTotal,
+            exportT2: 0,
+            exportT3: 0,
+            net: ksebBillSnapshot.net,
+            solarGenerated: ksebBillSnapshot.solarGenerated || 0,
+            note: 'KSEB Bill entry',
+          } as Reading
+        }
+      }
+
+      // Use KSEB bill reading as reference point if available, otherwise use first reading
+      const referenceReading = effectiveBillReading || first
+
+      if (referenceReading && last && inCycle.length > 1) {
+        importConsumed = calculateImportTotal(last) - calculateImportTotal(referenceReading)
+        exportConsumed = calculateExportTotal(last) - calculateExportTotal(referenceReading)
+        solarAdded = last.solarGenerated - referenceReading.solarGenerated
       }
 
       const netConsumed = importConsumed - exportConsumed
-      let openingBank = billAnchorReading ? Math.max(0, -calculateNet(billAnchorReading)) : cycle.openingBank
+      
+      // Use KSEB bill net directly if available; otherwise calculate from cycle
+      let openingBank = 0
+      if (effectiveBillReading) {
+        const billNet = calculateNet(effectiveBillReading)
+        // If net is negative (export > import), that's a credit/bank
+        openingBank = Math.max(0, -billNet)
+      } else {
+        // Fallback to cycle's opening bank if no KSEB bill
+        openingBank = cycle.openingBank
+      }
+      
       let bankUsed = 0
       let bankAdded = 0
       let payableUnits = 0
@@ -2613,7 +2656,7 @@ function App() {
       totalNet: calculateNet(latest),
       totalSolar: latest.solarGenerated,
     }
-  }, [sortedReadings, billingDay, billingCycles, selectedBillingCycleKey])
+  }, [sortedReadings, billingDay, billingCycles, selectedBillingCycleKey, ksebBillSnapshot])
 
   const currentBank = billingCycles.length
     ? billingCycles[billingCycles.length - 1].closingBank
