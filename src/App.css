@@ -1792,8 +1792,9 @@ th {
     align-items: center;
     justify-content: center;
     position: fixed;
-    right: 12px;
+    right: max(12px, env(safe-area-inset-right));
     bottom: calc(72px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 24px - env(safe-area-inset-right));
     z-index: 70;
     border-radius: 999px;
     padding: 0.68rem 0.95rem;
@@ -1809,8 +1810,9 @@ th {
     align-items: center;
     justify-content: center;
     position: fixed;
-    right: 12px;
+    right: max(12px, env(safe-area-inset-right));
     bottom: calc(122px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 24px - env(safe-area-inset-right));
     z-index: 70;
     border-radius: 999px;
     padding: 0.62rem 0.9rem;
