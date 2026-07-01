@@ -2817,10 +2817,9 @@ function App() {
     const netConsumed = importConsumed - exportConsumed
     const solarAdded = latestReading.solarGenerated - latestKsebBillReading.solarGenerated
 
-    const billCycleKey = getCycleBoundaries(latestKsebBillReading.date, billingDay).key
-    const billCycleIndex = billingCycles.findIndex((cycle) => cycle.key === billCycleKey)
-    const openingBank =
-      billCycleIndex >= 0 ? billingCycles[billCycleIndex].openingBank : currentBank
+    // Use currentBank directly — it is the last completed cycle's closing bank,
+    // consistently derived from readings on all devices regardless of billingDay setting.
+    const openingBank = currentBank
 
     const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
     const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
@@ -2836,7 +2835,7 @@ function App() {
       payableUnits,
       closingBank,
     }
-  }, [sortedReadings, latestKsebBillReading, billingDay, billingCycles, currentBank])
+  }, [sortedReadings, latestKsebBillReading, currentBank])
 
   const billCycleViewOptions = useMemo(() => {
     if (!ksebBillReadings.length) {
