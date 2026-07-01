@@ -1839,10 +1839,6 @@ const findLatestKsebBillReading = (items: Reading[]) =>
     .filter((reading) => (reading.note ?? '').toLowerCase().includes('kseb bill'))
     .sort((a, b) => getReadingTimestamp(b) - getReadingTimestamp(a))[0] ?? null
 
-const getClosedCycleKeyFromBillDate = (billDate: string, billingDay: BillingDay) => {
-  const closedCycleAnchor = dayjs(billDate).subtract(1, 'day').format('YYYY-MM-DD')
-  return getCycleBoundaries(closedCycleAnchor, billingDay).key
-}
 
 const toPercent = (value: number) => `${value.toFixed(1)}%`
 
@@ -2842,9 +2838,10 @@ function App() {
       return []
     }
 
+    // Build purely from consecutive bill readings — zero dependency on billingDay or billingCycles.
+    // Each bill reading closes a cycle whose start is the previous bill (or first reading before it).
     const options: Array<{
       id: string
-      cycleKey: string
       billReading: Reading
       label: string
       summary: {
@@ -2858,62 +2855,49 @@ function App() {
       }
     }> = []
 
-    const seen = new Set<string>()
+    let runningBank = 0
 
-    for (const billReading of ksebBillReadings) {
-      const closedCycleKey = getClosedCycleKeyFromBillDate(billReading.date, billingDay)
-      if (seen.has(closedCycleKey)) {
-        continue
-      }
+    for (let index = 0; index < ksebBillReadings.length; index++) {
+      const endBill = ksebBillReadings[index]
+      const endBillTs = getReadingTimestamp(endBill)
 
-      const matchedCycle = billingCycles.find((cycle) => cycle.key === closedCycleKey)
-      if (!matchedCycle) {
-        continue
-      }
-
-      const cycleStartTs = dayjs(`${matchedCycle.start}T00:00`).valueOf()
-      const cycleEndTs = dayjs(`${matchedCycle.end}T23:59`).valueOf()
-      const billTs = getReadingTimestamp(billReading)
-
-      const inCycleReadings = sortReadings(
-        sortedReadings.filter((reading) => {
-          const ts = getReadingTimestamp(reading)
-          return ts >= cycleStartTs && ts <= cycleEndTs
-        }),
-      )
-
+      // Reference: previous bill reading if exists, otherwise the FIRST (baseline/installation)
+      // reading before this bill — so the first bill cycle covers full consumption since day 1.
+      const prevBill = index > 0 ? ksebBillReadings[index - 1] : null
       const referenceReading =
-        sortReadings(sortedReadings.filter((reading) => getReadingTimestamp(reading) <= cycleStartTs)).at(-1) ??
-        inCycleReadings[0] ??
-        sortReadings(sortedReadings.filter((reading) => getReadingTimestamp(reading) < billTs)).at(-1)
+        prevBill ??
+        [...sortedReadings]
+          .filter((reading) => getReadingTimestamp(reading) < endBillTs)
+          .at(0)
+
+      if (!referenceReading) {
+        continue
+      }
 
       const importConsumed =
-        referenceReading && billTs >= getReadingTimestamp(referenceReading)
-          ? calculateImportTotal(billReading) - calculateImportTotal(referenceReading)
-          : 0
+        calculateImportTotal(endBill) - calculateImportTotal(referenceReading)
       const exportConsumed =
-        referenceReading && billTs >= getReadingTimestamp(referenceReading)
-          ? calculateExportTotal(billReading) - calculateExportTotal(referenceReading)
-          : 0
+        calculateExportTotal(endBill) - calculateExportTotal(referenceReading)
       const netConsumed = importConsumed - exportConsumed
-      const solarAdded =
-        referenceReading && billTs >= getReadingTimestamp(referenceReading)
-          ? billReading.solarGenerated - referenceReading.solarGenerated
-          : 0
+      const solarAdded = endBill.solarGenerated - referenceReading.solarGenerated
 
-      const openingBank = matchedCycle.openingBank
+      const openingBank = runningBank
       const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
       const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
       const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
       const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
 
+      runningBank = closingBank
+
+      const id = `bill-cycle-${endBill.date}T${endBill.time}`
+      const label = `${dayjs(endBill.date).format('MMM YYYY')} (${dayjs(referenceReading.date).format('DD MMM')} → ${dayjs(endBill.date).format('DD MMM')})`
+
       options.push({
-        id: `bill-cycle-${closedCycleKey}`,
-        cycleKey: closedCycleKey,
-        billReading,
-        label: `${dayjs(matchedCycle.end).format('MMM YYYY')} (${dayjs(matchedCycle.start).format('DD MMM')} - ${dayjs(matchedCycle.end).format('DD MMM')})`,
+        id,
+        billReading: endBill,
+        label,
         summary: {
-          periodLabel: `${dayjs(matchedCycle.start).format('DD MMM YYYY')} - ${dayjs(matchedCycle.end).format('DD MMM YYYY')}`,
+          periodLabel: `${dayjs(referenceReading.date).format('DD MMM YYYY')} - ${dayjs(endBill.date).format('DD MMM YYYY')}`,
           importConsumed,
           exportConsumed,
           netConsumed,
@@ -2922,21 +2906,25 @@ function App() {
           closingBank,
         },
       })
-
-      seen.add(closedCycleKey)
     }
 
-    return options.sort((a, b) => a.cycleKey.localeCompare(b.cycleKey))
-  }, [ksebBillReadings, billingCycles, billingDay, derivedReadings])
+    return options
+  }, [ksebBillReadings, sortedReadings])
 
   const pendingBillCycleLabel = useMemo(() => {
     const latestBill = ksebBillReadings[ksebBillReadings.length - 1]
     if (!latestBill) {
       return ''
     }
-
-    return `${dayjs(latestBill.date).format('MMM YYYY')} (${dayjs(latestBill.date).format('DD MMM')} - Pending bill)`
-  }, [ksebBillReadings])
+    const latestBillTs = getReadingTimestamp(latestBill)
+    const nextRef =
+      [...sortedReadings]
+        .filter((reading) => getReadingTimestamp(reading) > latestBillTs)
+        .at(0)
+    const fromLabel = dayjs(latestBill.date).format('DD MMM')
+    const toLabel = nextRef ? dayjs(nextRef.date).format('DD MMM') : 'Now'
+    return `${dayjs(latestBill.date).format('MMM YYYY')} (${fromLabel} → ${toLabel}) — Pending bill`
+  }, [ksebBillReadings, sortedReadings])
 
   useEffect(() => {
     if (selectedBillViewCycleId && !billCycleViewOptions.some((option) => option.id === selectedBillViewCycleId)) {
@@ -2949,13 +2937,6 @@ function App() {
     [billCycleViewOptions, selectedBillViewCycleId],
   )
 
-  useEffect(() => {
-    if (selectedBillCycleView) {
-      setSelectedBillingCycleKey(selectedBillCycleView.cycleKey)
-      return
-    }
-    setSelectedBillingCycleKey(null)
-  }, [selectedBillCycleView])
 
   const isCycleView = Boolean(selectedBillCycleView)
   const billingDisplay = isCycleView ? selectedBillCycleView?.summary ?? null : liveBillingSummary
