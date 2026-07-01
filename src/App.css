@@ -1502,6 +1502,78 @@ th {
   font-size: 1.08rem;
 }
 
+.billing-snapshot-card {
+  position: relative;
+  background:
+    radial-gradient(circle at top right, rgba(255, 221, 150, 0.22), transparent 34%),
+    radial-gradient(circle at bottom left, rgba(147, 216, 196, 0.16), transparent 36%),
+    linear-gradient(165deg, #fbfdff, #f3f8fc);
+  border-color: #cadeea;
+}
+
+.billing-snapshot-metrics {
+  max-width: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.billing-snapshot-metrics .snapshot-tile {
+  border: 1px solid #d4e0e8;
+  border-left-width: 4px;
+  border-radius: 12px;
+  padding: 0.58rem 0.66rem;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+  align-items: center;
+  grid-template-columns: minmax(120px, 1fr) max-content;
+}
+
+.billing-snapshot-metrics .snapshot-tile span {
+  color: #3d5f72;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.billing-snapshot-metrics .snapshot-tile strong {
+  font-size: 1.1rem;
+  color: #132f40;
+}
+
+.billing-snapshot-metrics .snapshot-import {
+  border-left-color: #2f7ba5;
+}
+
+.billing-snapshot-metrics .snapshot-export {
+  border-left-color: #2e8f65;
+}
+
+.billing-snapshot-metrics .snapshot-net {
+  border-left-color: #276281;
+}
+
+.billing-snapshot-metrics .snapshot-payable {
+  border-left-color: #c06934;
+  background: linear-gradient(145deg, #fff7ef, #fffdf9);
+}
+
+.billing-snapshot-metrics .snapshot-bank {
+  border-left-color: #1f7a5d;
+  background: linear-gradient(145deg, #effaf4, #fbfffd);
+}
+
+.billing-snapshot-metrics .snapshot-solar {
+  border-left-color: #c89b1f;
+  background: linear-gradient(145deg, #fff9e8, #fffef8);
+}
+
+.billing-snapshot-footnote {
+  margin-top: 0.75rem;
+  padding-top: 0.48rem;
+  border-top: 1px dashed #ccdae4;
+}
+
 .insights-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1599,6 +1671,10 @@ th {
     grid-template-columns: 1fr;
   }
 
+  .billing-snapshot-metrics {
+    grid-template-columns: 1fr;
+  }
+
   .reading-form {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1641,7 +1717,14 @@ th {
   }
 
   .quick-add-bar {
-    display: none;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.35rem;
+  }
+
+  .quick-add-button {
+    padding: 0.48rem 0.88rem;
+    font-size: 0.85rem;
   }
 
   .hero {

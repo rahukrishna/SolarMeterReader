@@ -204,6 +204,20 @@ type KsebBillSnapshot = {
   updatedAt: string
 }
 
+type BillingEntryComparison = {
+  date: string
+  time: string
+  enteredImport: number
+  enteredExport: number
+  enteredNet: number
+  billImport: number
+  billExport: number
+  billNet: number
+  importDiff: number
+  exportDiff: number
+  netDiff: number
+}
+
 type SyncStatus = 'idle' | 'syncing' | 'success' | 'error'
 type AppTab = 'home' | 'analytics' | 'history' | 'cloud' | 'manage'
 
@@ -618,11 +632,8 @@ const summarizeBillingCycles = (
 
   for (let i = 0; i < recordedCycles.length; i += 1) {
     const cycle = recordedCycles[i]
-    const cycleRows = sortReadings(rowsByCycle.get(cycle.key) ?? [])
 
-    const firstRow = cycleRows[0]
-    const cycleOpeningCredit = firstRow ? Math.max(0, -(calculateNet(firstRow) || 0)) : 0
-    cycle.openingBank = runningBank + cycleOpeningCredit
+    cycle.openingBank = runningBank
     cycle.consumedUnits = Math.max(cycle.net, 0)
 
     if (cycle.net >= 0) {
@@ -1828,6 +1839,11 @@ const findLatestKsebBillReading = (items: Reading[]) =>
     .filter((reading) => (reading.note ?? '').toLowerCase().includes('kseb bill'))
     .sort((a, b) => getReadingTimestamp(b) - getReadingTimestamp(a))[0] ?? null
 
+const getClosedCycleKeyFromBillDate = (billDate: string, billingDay: BillingDay) => {
+  const closedCycleAnchor = dayjs(billDate).subtract(1, 'day').format('YYYY-MM-DD')
+  return getCycleBoundaries(closedCycleAnchor, billingDay).key
+}
+
 const toPercent = (value: number) => `${value.toFixed(1)}%`
 
 const formatSigned = (value: number) => (value >= 0 ? `+${value.toFixed(2)}` : value.toFixed(2))
@@ -1846,6 +1862,7 @@ function App() {
   const [cloudBusy, setCloudBusy] = useState(false)
   const [cloudMessage, setCloudMessage] = useState('')
   const [selectedBillingCycleKey, setSelectedBillingCycleKey] = useState<string | null>(null)
+  const [selectedBillViewCycleId, setSelectedBillViewCycleId] = useState('')
   const [solarHistoryMonthFilter, setSolarHistoryMonthFilter] = useState('')
   const [solarHistoryYearFilter, setSolarHistoryYearFilter] = useState('')
   const [editingReadingId, setEditingReadingId] = useState<string | null>(null)
@@ -1873,6 +1890,13 @@ function App() {
   const [ksebBillNetInput, setKsebBillNetInput] = useState('')
   const [ksebBillSolarInput, setKsebBillSolarInput] = useState('')
   const [ksebBillSnapshot, setKsebBillSnapshot] = useState<KsebBillSnapshot | null>(null)
+  const [billingCompareDate, setBillingCompareDate] = useState(dayjs().format('YYYY-MM-DD'))
+  const [billingCompareTime, setBillingCompareTime] = useState('07:00')
+  const [billingCompareImportInput, setBillingCompareImportInput] = useState('')
+  const [billingCompareExportInput, setBillingCompareExportInput] = useState('')
+  const [billingCompareNetInput, setBillingCompareNetInput] = useState('')
+  const [billingComparisonResult, setBillingComparisonResult] =
+    useState<BillingEntryComparison | null>(null)
   const [billImportBusy, setBillImportBusy] = useState(false)
   const [billImportMessage, setBillImportMessage] = useState('')
   const [weatherSignals, setWeatherSignals] = useState<Record<string, WeatherDaySignal>>({})
@@ -2520,7 +2544,17 @@ function App() {
       )
 
       const first = inCycle[0]
-      const last = inCycle[inCycle.length - 1]
+      const lastInCycle = inCycle[inCycle.length - 1]
+      const cycleEnd = dayjs(cycle.end).endOf('day')
+      const postCycleReadings = sortReadings(
+        sortedReadings.filter((reading) => getReadingTimestamp(reading) > cycleEnd.valueOf()),
+      )
+      const boundaryKsebReading = postCycleReadings.find(
+        (reading) =>
+          (reading.note ?? '').toLowerCase().includes('kseb bill') &&
+          dayjs(reading.date).isBefore(dayjs(cycle.end).add(2, 'day').endOf('day')),
+      )
+      const closingReading = boundaryKsebReading ?? postCycleReadings[0] ?? lastInCycle
       const billAnchorReading = [...inCycle]
         .reverse()
         .find((reading) => (reading.note ?? '').toLowerCase().includes('kseb bill'))
@@ -2561,24 +2595,19 @@ function App() {
       // Use KSEB bill reading as reference point if available, otherwise use first reading
       const referenceReading = effectiveBillReading || first
 
-      if (referenceReading && last && inCycle.length > 1) {
-        importConsumed = calculateImportTotal(last) - calculateImportTotal(referenceReading)
-        exportConsumed = calculateExportTotal(last) - calculateExportTotal(referenceReading)
-        solarAdded = last.solarGenerated - referenceReading.solarGenerated
+      if (referenceReading && closingReading && getReadingTimestamp(closingReading) >= getReadingTimestamp(referenceReading)) {
+        importConsumed =
+          calculateImportTotal(closingReading) - calculateImportTotal(referenceReading)
+        exportConsumed =
+          calculateExportTotal(closingReading) - calculateExportTotal(referenceReading)
+        solarAdded = closingReading.solarGenerated - referenceReading.solarGenerated
       }
 
       const netConsumed = importConsumed - exportConsumed
       
-      // Use KSEB bill net directly if available; otherwise calculate from cycle
-      let openingBank = 0
-      if (effectiveBillReading) {
-        const billNet = calculateNet(effectiveBillReading)
-        // If net is negative (export > import), that's a credit/bank
-        openingBank = Math.max(0, -billNet)
-      } else {
-        // Fallback to cycle's opening bank if no KSEB bill
-        openingBank = cycle.openingBank
-      }
+      // Opening bank should always come from the billing cycle calculation
+      // which properly carries forward from the previous cycle's closing bank
+      const openingBank = cycle.openingBank
       
       let bankUsed = 0
       let bankAdded = 0
@@ -2606,10 +2635,10 @@ function App() {
         payableUnits,
         closingBank,
         remainingBank: closingBank,
-        totalImport: last ? calculateImportTotal(last) : 0,
-        totalExport: last ? calculateExportTotal(last) : 0,
-        totalNet: last ? calculateNet(last) : 0,
-        totalSolar: last ? last.solarGenerated : 0,
+        totalImport: closingReading ? calculateImportTotal(closingReading) : 0,
+        totalExport: closingReading ? calculateExportTotal(closingReading) : 0,
+        totalNet: closingReading ? calculateNet(closingReading) : 0,
+        totalSolar: closingReading ? closingReading.solarGenerated : 0,
       }
     }
 
@@ -2621,37 +2650,70 @@ function App() {
       }
     }
 
-    // Default: use the cycle that contains today's date, not just the latest reading date.
-    const todayCycleBounds = getCycleBoundaries(dayjs().format('YYYY-MM-DD'), billingDay)
-    const todayCycle = billingCycles.find((c) => c.key === todayCycleBounds.key)
-    if (todayCycle) {
-      return buildTrackerFromCycle(todayCycle)
-    }
+    // Default: calendar month to date (what users expect from "Current Month").
+    const today = dayjs()
+    const monthStart = today.startOf('month')
+    const monthEnd = today.endOf('day')
 
-    // Fallback for sparse data: use latest reading cycle.
-    const latestCycleBounds = getCycleBoundaries(latest.date, billingDay)
-    const latestCycle = billingCycles.find((c) => c.key === latestCycleBounds.key)
-    if (latestCycle) {
-      return buildTrackerFromCycle(latestCycle)
-    }
+    const inMonthReadings = sortReadings(
+      sortedReadings.filter((reading) => {
+        const ts = dayjs(`${reading.date}T${reading.time || '00:00'}`)
+        return (
+          (ts.isSame(monthStart) || ts.isAfter(monthStart)) &&
+          (ts.isSame(monthEnd) || ts.isBefore(monthEnd))
+        )
+      }),
+    )
+
+    const baselineReading =
+      [...sortedReadings]
+        .reverse()
+        .find((reading) =>
+          dayjs(`${reading.date}T${reading.time || '00:00'}`).isBefore(monthStart),
+        ) ?? inMonthReadings[0]
+
+    const closingReading = inMonthReadings[inMonthReadings.length - 1] ?? latest
+
+    const importConsumed =
+      baselineReading && closingReading
+        ? calculateImportTotal(closingReading) - calculateImportTotal(baselineReading)
+        : 0
+    const exportConsumed =
+      baselineReading && closingReading
+        ? calculateExportTotal(closingReading) - calculateExportTotal(baselineReading)
+        : 0
+    const solarAdded =
+      baselineReading && closingReading
+        ? closingReading.solarGenerated - baselineReading.solarGenerated
+        : 0
+    const netConsumed = importConsumed - exportConsumed
+
+    const todayCycleBounds = getCycleBoundaries(today.format('YYYY-MM-DD'), billingDay)
+    const todayCycle = billingCycles.find((cycle) => cycle.key === todayCycleBounds.key)
+    const openingBank = todayCycle?.openingBank ?? 0
+
+    const bankUsed = netConsumed >= 0 ? Math.min(openingBank, netConsumed) : 0
+    const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
+    const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
+    const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
 
     return {
-      periodLabel: `${dayjs(latestCycleBounds.start).format('DD MMM YYYY')} - ${dayjs(latestCycleBounds.end).format('DD MMM YYYY')}`,
-      readingsCount: 0,
-      importConsumed: 0,
-      exportConsumed: 0,
-      netConsumed: 0,
-      solarAdded: 0,
-      openingBank: 0,
-      bankUsed: 0,
-      bankAdded: 0,
-      payableUnits: 0,
-      closingBank: 0,
-      remainingBank: 0,
-      totalImport: calculateImportTotal(latest),
-      totalExport: calculateExportTotal(latest),
-      totalNet: calculateNet(latest),
-      totalSolar: latest.solarGenerated,
+      periodLabel: `${monthStart.format('DD MMM YYYY')} - ${today.format('DD MMM YYYY')}`,
+      readingsCount: inMonthReadings.length,
+      importConsumed,
+      exportConsumed,
+      netConsumed,
+      solarAdded,
+      openingBank,
+      bankUsed,
+      bankAdded,
+      payableUnits,
+      closingBank,
+      remainingBank: closingBank,
+      totalImport: calculateImportTotal(closingReading),
+      totalExport: calculateExportTotal(closingReading),
+      totalNet: calculateNet(closingReading),
+      totalSolar: closingReading.solarGenerated,
     }
   }, [sortedReadings, billingDay, billingCycles, selectedBillingCycleKey, ksebBillSnapshot])
 
@@ -2691,6 +2753,217 @@ function App() {
     }
     return billingCycles[billingCycles.length - 1]
   }, [billingCycles, selectedBillingCycleKey])
+
+  const ksebBillReadings = useMemo(() => {
+    const fromReadings = sortedReadings.filter((reading) =>
+      (reading.note ?? '').toLowerCase().includes('kseb bill'),
+    )
+
+    let combined = sortReadings(fromReadings)
+
+    if (ksebBillSnapshot) {
+      const snapshotReading = {
+        id: `kseb-${ksebBillSnapshot.date}T${ksebBillSnapshot.time}`,
+        date: ksebBillSnapshot.date,
+        time: ksebBillSnapshot.time,
+        importT: ksebBillSnapshot.importTotal,
+        importT1: ksebBillSnapshot.importTotal,
+        importT2: 0,
+        importT3: 0,
+        exportT: ksebBillSnapshot.exportTotal,
+        exportT1: ksebBillSnapshot.exportTotal,
+        exportT2: 0,
+        exportT3: 0,
+        net: ksebBillSnapshot.net,
+        solarGenerated: ksebBillSnapshot.solarGenerated,
+        note: 'KSEB Bill entry',
+      } satisfies Reading
+
+      const existingIndex = combined.findIndex(
+        (reading) =>
+          reading.date === snapshotReading.date && reading.time === snapshotReading.time,
+      )
+
+      if (existingIndex >= 0) {
+        combined = combined.map((reading, index) =>
+          index === existingIndex ? snapshotReading : reading,
+        )
+      } else {
+        combined = sortReadings([...combined, snapshotReading])
+      }
+    }
+
+    return combined
+  }, [sortedReadings, ksebBillSnapshot])
+
+  const liveBillingSummary = useMemo(() => {
+    const latestReading = sortedReadings[sortedReadings.length - 1]
+
+    if (!latestReading || !latestKsebBillReading) {
+      return null
+    }
+
+    const billTimestamp = getReadingTimestamp(latestKsebBillReading)
+    const currentTimestamp = getReadingTimestamp(latestReading)
+
+    if (currentTimestamp < billTimestamp) {
+      return null
+    }
+
+    const importConsumed =
+      calculateImportTotal(latestReading) - calculateImportTotal(latestKsebBillReading)
+    const exportConsumed =
+      calculateExportTotal(latestReading) - calculateExportTotal(latestKsebBillReading)
+    const netConsumed = importConsumed - exportConsumed
+    const solarAdded = latestReading.solarGenerated - latestKsebBillReading.solarGenerated
+
+    const billCycleKey = getCycleBoundaries(latestKsebBillReading.date, billingDay).key
+    const billCycleIndex = billingCycles.findIndex((cycle) => cycle.key === billCycleKey)
+    const openingBank =
+      billCycleIndex >= 0 ? billingCycles[billCycleIndex].openingBank : currentBank
+
+    const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
+    const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
+    const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
+    const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
+
+    return {
+      periodLabel: `${dayjs(latestKsebBillReading.date).format('DD MMM YYYY')} - ${dayjs(latestReading.date).format('DD MMM YYYY')}`,
+      importConsumed,
+      exportConsumed,
+      netConsumed,
+      solarAdded,
+      payableUnits,
+      closingBank,
+    }
+  }, [sortedReadings, latestKsebBillReading, billingDay, billingCycles, currentBank])
+
+  const billCycleViewOptions = useMemo(() => {
+    if (!ksebBillReadings.length) {
+      return []
+    }
+
+    const options: Array<{
+      id: string
+      cycleKey: string
+      billReading: Reading
+      label: string
+      summary: {
+        periodLabel: string
+        importConsumed: number
+        exportConsumed: number
+        netConsumed: number
+        solarAdded: number
+        payableUnits: number
+        closingBank: number
+      }
+    }> = []
+
+    const seen = new Set<string>()
+
+    for (const billReading of ksebBillReadings) {
+      const closedCycleKey = getClosedCycleKeyFromBillDate(billReading.date, billingDay)
+      if (seen.has(closedCycleKey)) {
+        continue
+      }
+
+      const matchedCycle = billingCycles.find((cycle) => cycle.key === closedCycleKey)
+      if (!matchedCycle) {
+        continue
+      }
+
+      const cycleStartTs = dayjs(`${matchedCycle.start}T00:00`).valueOf()
+      const cycleEndTs = dayjs(`${matchedCycle.end}T23:59`).valueOf()
+      const billTs = getReadingTimestamp(billReading)
+
+      const inCycleReadings = sortReadings(
+        sortedReadings.filter((reading) => {
+          const ts = getReadingTimestamp(reading)
+          return ts >= cycleStartTs && ts <= cycleEndTs
+        }),
+      )
+
+      const referenceReading =
+        sortReadings(sortedReadings.filter((reading) => getReadingTimestamp(reading) <= cycleStartTs)).at(-1) ??
+        inCycleReadings[0] ??
+        sortReadings(sortedReadings.filter((reading) => getReadingTimestamp(reading) < billTs)).at(-1)
+
+      const importConsumed =
+        referenceReading && billTs >= getReadingTimestamp(referenceReading)
+          ? calculateImportTotal(billReading) - calculateImportTotal(referenceReading)
+          : 0
+      const exportConsumed =
+        referenceReading && billTs >= getReadingTimestamp(referenceReading)
+          ? calculateExportTotal(billReading) - calculateExportTotal(referenceReading)
+          : 0
+      const netConsumed = importConsumed - exportConsumed
+      const solarAdded =
+        referenceReading && billTs >= getReadingTimestamp(referenceReading)
+          ? billReading.solarGenerated - referenceReading.solarGenerated
+          : 0
+
+      const openingBank = matchedCycle.openingBank
+      const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
+      const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
+      const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
+      const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
+
+      options.push({
+        id: `bill-cycle-${closedCycleKey}`,
+        cycleKey: closedCycleKey,
+        billReading,
+        label: `${dayjs(matchedCycle.end).format('MMM YYYY')} (${dayjs(matchedCycle.start).format('DD MMM')} - ${dayjs(matchedCycle.end).format('DD MMM')})`,
+        summary: {
+          periodLabel: `${dayjs(matchedCycle.start).format('DD MMM YYYY')} - ${dayjs(matchedCycle.end).format('DD MMM YYYY')}`,
+          importConsumed,
+          exportConsumed,
+          netConsumed,
+          solarAdded,
+          payableUnits,
+          closingBank,
+        },
+      })
+
+      seen.add(closedCycleKey)
+    }
+
+    return options.sort((a, b) => a.cycleKey.localeCompare(b.cycleKey))
+  }, [ksebBillReadings, billingCycles, billingDay, derivedReadings])
+
+  const pendingBillCycleLabel = useMemo(() => {
+    const latestBill = ksebBillReadings[ksebBillReadings.length - 1]
+    if (!latestBill) {
+      return ''
+    }
+
+    return `${dayjs(latestBill.date).format('MMM YYYY')} (${dayjs(latestBill.date).format('DD MMM')} - Pending bill)`
+  }, [ksebBillReadings])
+
+  useEffect(() => {
+    if (selectedBillViewCycleId && !billCycleViewOptions.some((option) => option.id === selectedBillViewCycleId)) {
+      setSelectedBillViewCycleId('')
+    }
+  }, [selectedBillViewCycleId, billCycleViewOptions])
+
+  const selectedBillCycleView = useMemo(
+    () => billCycleViewOptions.find((option) => option.id === selectedBillViewCycleId) ?? null,
+    [billCycleViewOptions, selectedBillViewCycleId],
+  )
+
+  useEffect(() => {
+    if (selectedBillCycleView) {
+      setSelectedBillingCycleKey(selectedBillCycleView.cycleKey)
+      return
+    }
+    setSelectedBillingCycleKey(null)
+  }, [selectedBillCycleView])
+
+  const isCycleView = Boolean(selectedBillCycleView)
+  const billingDisplay = isCycleView ? selectedBillCycleView?.summary ?? null : liveBillingSummary
+
+  const billingReferenceReading = isCycleView
+    ? selectedBillCycleView?.billReading ?? null
+    : latestKsebBillReading
 
   const selectedCycleReadings = useMemo(() => {
     if (!selectedCycle) {
@@ -4113,6 +4386,9 @@ function App() {
     setKsebBillSnapshot(nextKsebSnapshot)
     setBillingReferenceDate(ksebBillEntryDate)
     setBillGeneratedAt(`${ksebBillEntryDate}T${ksebBillEntryTime}`)
+    setBillingCompareDate(ksebBillEntryDate)
+    setBillingCompareTime(ksebBillEntryTime)
+    setBillingComparisonResult(null)
     setKsebBillSolarInput('')
     applyBillingDateToCycle(ksebBillEntryDate)
     markLocalChange()
@@ -4121,6 +4397,146 @@ function App() {
 
     if (supabase && cloudUser) {
       void pushToCloud(nextReadings, true, solarUsageLogs, solarDailySummaries, nextKsebSnapshot)
+    }
+  }
+
+  const compareBillingDateReading = () => {
+    const comparisonBillReading = billingReferenceReading
+
+    if (!comparisonBillReading) {
+      setAppToast('Save a KSEB bill entry first to compare against it.')
+      return
+    }
+
+    if (!billingCompareDate.trim() || !billingCompareTime.trim()) {
+      setAppToast('Enter billing date and time for your reading.')
+      return
+    }
+
+    const timestamp = dayjs(`${billingCompareDate}T${billingCompareTime}`)
+    if (!timestamp.isValid()) {
+      setAppToast('Enter a valid billing date and time.')
+      return
+    }
+
+    const enteredImport = Number(billingCompareImportInput)
+    const enteredExport = Number(billingCompareExportInput)
+    const explicitNet =
+      billingCompareNetInput.trim() === '' ? undefined : Number(billingCompareNetInput)
+
+    if (!Number.isFinite(enteredImport) || enteredImport < 0) {
+      setAppToast('Enter a valid import total for your reading.')
+      return
+    }
+
+    if (!Number.isFinite(enteredExport) || enteredExport < 0) {
+      setAppToast('Enter a valid export total for your reading.')
+      return
+    }
+
+    if (explicitNet !== undefined && !Number.isFinite(explicitNet)) {
+      setAppToast('Enter a valid net value or keep it blank.')
+      return
+    }
+
+    const enteredNet = explicitNet ?? enteredImport - enteredExport
+    const billImport = calculateImportTotal(comparisonBillReading)
+    const billExport = calculateExportTotal(comparisonBillReading)
+    const billNet = calculateNet(comparisonBillReading)
+
+    setBillingComparisonResult({
+      date: billingCompareDate,
+      time: billingCompareTime,
+      enteredImport,
+      enteredExport,
+      enteredNet,
+      billImport,
+      billExport,
+      billNet,
+      importDiff: enteredImport - billImport,
+      exportDiff: enteredExport - billExport,
+      netDiff: enteredNet - billNet,
+    })
+
+    setAppToast('Comparison ready. Check billing comparison details below.')
+    logActivity('compare-billing-reading', `${billingCompareDate} ${billingCompareTime}`)
+  }
+
+  const saveBillingDateReading = () => {
+    if (!billingCompareDate.trim() || !billingCompareTime.trim()) {
+      setAppToast('Enter billing date and time first.')
+      return
+    }
+
+    const timestamp = dayjs(`${billingCompareDate}T${billingCompareTime}`)
+    if (!timestamp.isValid()) {
+      setAppToast('Enter a valid billing date and time.')
+      return
+    }
+
+    const enteredImport = Number(billingCompareImportInput)
+    const enteredExport = Number(billingCompareExportInput)
+    const explicitNet =
+      billingCompareNetInput.trim() === '' ? undefined : Number(billingCompareNetInput)
+
+    if (!Number.isFinite(enteredImport) || enteredImport < 0) {
+      setAppToast('Enter a valid import total for your reading.')
+      return
+    }
+
+    if (!Number.isFinite(enteredExport) || enteredExport < 0) {
+      setAppToast('Enter a valid export total for your reading.')
+      return
+    }
+
+    if (explicitNet !== undefined && !Number.isFinite(explicitNet)) {
+      setAppToast('Enter a valid net value or keep it blank.')
+      return
+    }
+
+    const existingAtSameMoment = readings.find(
+      (reading) => reading.date === billingCompareDate && reading.time === billingCompareTime,
+    )
+
+    if (existingAtSameMoment && (existingAtSameMoment.note ?? '').toLowerCase().includes('kseb bill')) {
+      setAppToast('This timestamp already has the KSEB bill entry. Use a different time for your reading.')
+      return
+    }
+
+    const ownReading: Reading = {
+      id: existingAtSameMoment?.id ?? createReadingId(),
+      date: billingCompareDate,
+      time: billingCompareTime,
+      importT: enteredImport,
+      importT1: enteredImport,
+      importT2: 0,
+      importT3: 0,
+      exportT: enteredExport,
+      exportT1: enteredExport,
+      exportT2: 0,
+      exportT3: 0,
+      net: explicitNet ?? enteredImport - enteredExport,
+      solarGenerated: existingAtSameMoment?.solarGenerated ?? 0,
+      note: 'Billing date self reading',
+    }
+
+    saveRecoverySnapshot(readings)
+
+    const nextReadings = sortReadings(
+      existingAtSameMoment
+        ? readings.map((reading) =>
+            reading.id === existingAtSameMoment.id ? ownReading : reading,
+          )
+        : [...readings, ownReading],
+    )
+
+    setReadings(nextReadings)
+    markLocalChange()
+    setAppToast('Billing date meter reading saved.')
+    logActivity('save-billing-self-reading', `${billingCompareDate} ${billingCompareTime}`)
+
+    if (supabase && cloudUser) {
+      void pushToCloud(nextReadings, true, solarUsageLogs, solarDailySummaries)
     }
   }
 
@@ -5432,6 +5848,165 @@ function App() {
             </button>
           </div>
         </section>
+
+        <section className="kseb-bill-section">
+          <div className="section-head">
+            <h3>Billing Details</h3>
+            <button type="button" className="ghost" onClick={saveKsebBillDetails}>
+              Bill Published - Save
+            </button>
+          </div>
+
+          <div className="month-select-row">
+            <label className="month-select-label">
+              <span>Billing Cycle:</span>
+              <select
+                className="month-select-input"
+                value={selectedBillViewCycleId}
+                onChange={(event) => setSelectedBillViewCycleId(event.target.value)}
+              >
+                <option value="">Live (Last Bill - Now)</option>
+                {billCycleViewOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+                {pendingBillCycleLabel ? (
+                  <option value="__pending__" disabled>
+                    {pendingBillCycleLabel}
+                  </option>
+                ) : null}
+              </select>
+            </label>
+          </div>
+          <p className="field-hint">
+            Billing cycles are built from actual bill dates (1st/2nd/3rd as entered).
+          </p>
+
+          <p className="field-hint">
+            {billingDisplay
+              ? isCycleView
+                ? `Cycle view: ${billingDisplay.periodLabel}`
+                : `Live billing view (last KSEB bill to now): ${billingDisplay.periodLabel}`
+              : 'No KSEB bill available for billing summary yet.'}
+          </p>
+
+          <div className="tracker-metrics">
+            <div>
+              <span>Import Used</span>
+              <strong>{formatUnits(billingDisplay?.importConsumed ?? 0)}</strong>
+            </div>
+            <div>
+              <span>Export Used</span>
+              <strong>{formatUnits(billingDisplay?.exportConsumed ?? 0)}</strong>
+            </div>
+            <div>
+              <span>Net Used (Import - Export)</span>
+              <strong>{formatUnits(billingDisplay?.netConsumed ?? 0)}</strong>
+            </div>
+            <div>
+              <span>Updated Payable Units</span>
+              <strong>{formatUnits(billingDisplay?.payableUnits ?? 0)}</strong>
+            </div>
+            <div>
+              <span>Updated Bank Balance</span>
+              <strong>{formatUnits(billingDisplay?.closingBank ?? 0)}</strong>
+            </div>
+            <div>
+              <span>Solar Generated</span>
+              <strong>{formatUnits(billingDisplay?.solarAdded ?? 0)}</strong>
+            </div>
+          </div>
+
+          <div className="section-head" style={{ marginTop: '1.1rem' }}>
+            <h3 style={{ margin: 0 }}>Compare Your Billing-Date Reading</h3>
+          </div>
+
+          <div className="goals-grid">
+            <label>
+              Your Reading Date
+              <input
+                type="date"
+                value={billingCompareDate}
+                onChange={(event) => setBillingCompareDate(event.target.value)}
+              />
+            </label>
+            <label>
+              Your Reading Time
+              <input
+                type="time"
+                value={billingCompareTime}
+                onChange={(event) => setBillingCompareTime(event.target.value)}
+              />
+            </label>
+            <label>
+              Your Import Total
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={billingCompareImportInput}
+                onChange={(event) => setBillingCompareImportInput(event.target.value)}
+                placeholder="Your meter import"
+              />
+            </label>
+            <label>
+              Your Export Total
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={billingCompareExportInput}
+                onChange={(event) => setBillingCompareExportInput(event.target.value)}
+                placeholder="Your meter export"
+              />
+            </label>
+            <label>
+              Your Net (optional)
+              <input
+                type="number"
+                step="0.01"
+                value={billingCompareNetInput}
+                onChange={(event) => setBillingCompareNetInput(event.target.value)}
+                placeholder="Auto = Import - Export"
+              />
+            </label>
+          </div>
+
+          <div className="inline-actions">
+            <button type="button" onClick={saveBillingDateReading}>
+              Save My Billing-Date Reading
+            </button>
+            <button type="button" className="ghost" onClick={compareBillingDateReading}>
+              Compare With Bill Entry
+            </button>
+          </div>
+
+          {billingComparisonResult && (
+            <div className="tracker-metrics" style={{ marginTop: '0.75rem' }}>
+              <div>
+                <span>Compared For</span>
+                <strong>
+                  {dayjs(`${billingComparisonResult.date}T${billingComparisonResult.time}`).format(
+                    'DD MMM YYYY HH:mm',
+                  )}
+                </strong>
+              </div>
+              <div>
+                <span>Import Difference (Yours - Bill)</span>
+                <strong>{formatSigned(billingComparisonResult.importDiff)} kWh</strong>
+              </div>
+              <div>
+                <span>Export Difference (Yours - Bill)</span>
+                <strong>{formatSigned(billingComparisonResult.exportDiff)} kWh</strong>
+              </div>
+              <div>
+                <span>Net Difference (Yours - Bill)</span>
+                <strong>{formatSigned(billingComparisonResult.netDiff)} kWh</strong>
+              </div>
+            </div>
+          )}
+        </section>
       </section>
 
       )}
@@ -5562,6 +6137,9 @@ function App() {
       <section className="card month-tracker">
         <div className="section-head">
           <h2>Current Month Usage</h2>
+          <button type="button" className="ghost" onClick={() => setActiveTab('manage')}>
+            Manage Billing Details
+          </button>
           <p className="field-hint">
             {currentMonthTracker.periodLabel} | Readings: {currentMonthTracker.readingsCount}
           </p>
@@ -5670,43 +6248,85 @@ function App() {
         </div>
       </section>
 
-      <section className="card">
+      <section className="card billing-snapshot-card">
         <div className="section-head">
-          <h2>Last KSEB Bill Reading</h2>
+          <h2>Billing Snapshot</h2>
           <button type="button" className="ghost" onClick={() => setActiveTab('manage')}>
-            Update In Manage
+            Add Or Edit In Manage
           </button>
         </div>
-        {latestKsebBillReading ? (
-          <div className="tracker-metrics">
-            <div>
-              <span>Date and Time</span>
-              <strong>
-                {dayjs(`${latestKsebBillReading.date}T${latestKsebBillReading.time}`).format(
-                  'DD MMM YYYY HH:mm',
-                )}
-              </strong>
-            </div>
-            <div>
-              <span>Import Total</span>
-              <strong>{formatUnits(calculateImportTotal(latestKsebBillReading))}</strong>
-            </div>
-            <div>
-              <span>Export Total</span>
-              <strong>{formatUnits(calculateExportTotal(latestKsebBillReading))}</strong>
-            </div>
-            <div>
-              <span>Net</span>
-              <strong>{formatUnits(calculateNet(latestKsebBillReading))}</strong>
-            </div>
-            <div>
-              <span>Generated Solar</span>
-              <strong>{formatUnits(latestKsebBillReading.solarGenerated)}</strong>
-            </div>
+
+        <div className="month-select-row">
+          <label className="month-select-label">
+            <span>Billing Cycle:</span>
+            <select
+              className="month-select-input"
+              value={selectedBillViewCycleId}
+              onChange={(event) => setSelectedBillViewCycleId(event.target.value)}
+            >
+              <option value="">Live (Last Bill - Now)</option>
+              {billCycleViewOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+              {pendingBillCycleLabel ? (
+                <option value="__pending__" disabled>
+                  {pendingBillCycleLabel}
+                </option>
+              ) : null}
+            </select>
+          </label>
+        </div>
+        <p className="field-hint">
+          Billing cycles are built from actual bill dates (1st/2nd/3rd as entered).
+        </p>
+
+        <p className="field-hint">
+          {billingDisplay
+            ? isCycleView
+              ? `Cycle view: ${billingDisplay.periodLabel}`
+              : `Live billing view (last KSEB bill to now): ${billingDisplay.periodLabel}`
+            : 'No KSEB bill available for billing summary yet.'}
+        </p>
+
+        <div className="tracker-metrics billing-snapshot-metrics">
+          <div className="snapshot-tile snapshot-import">
+            <span>Import Used</span>
+            <strong>{formatUnits(billingDisplay?.importConsumed ?? 0)}</strong>
           </div>
+          <div className="snapshot-tile snapshot-export">
+            <span>Export Used</span>
+            <strong>{formatUnits(billingDisplay?.exportConsumed ?? 0)}</strong>
+          </div>
+          <div className="snapshot-tile snapshot-net">
+            <span>Net Used</span>
+            <strong>{formatUnits(billingDisplay?.netConsumed ?? 0)}</strong>
+          </div>
+          <div className="snapshot-tile snapshot-payable">
+            <span>Payable Units</span>
+            <strong>{formatUnits(billingDisplay?.payableUnits ?? 0)}</strong>
+          </div>
+          <div className="snapshot-tile snapshot-bank">
+            <span>Bank Balance</span>
+            <strong>{formatUnits(billingDisplay?.closingBank ?? 0)}</strong>
+          </div>
+          <div className="snapshot-tile snapshot-solar">
+            <span>Solar Generated</span>
+            <strong>{formatUnits(billingDisplay?.solarAdded ?? 0)}</strong>
+          </div>
+        </div>
+
+        {billingReferenceReading ? (
+          <p className="field-hint billing-snapshot-footnote">
+            {isCycleView ? 'Cycle' : 'Last'} KSEB bill reading:{' '}
+            {dayjs(`${billingReferenceReading.date}T${billingReferenceReading.time}`).format('DD MMM YYYY HH:mm')} | IMP {calculateImportTotal(billingReferenceReading).toFixed(2)} | EXP {calculateExportTotal(billingReferenceReading).toFixed(2)}
+          </p>
         ) : (
-          <p className="field-hint">
-            No KSEB bill reading saved yet. Open Manage tab and save bill details.
+          <p className="field-hint billing-snapshot-footnote">
+            {isCycleView
+              ? 'No KSEB bill entry found in this cycle. You can add it from Manage tab.'
+              : 'No KSEB bill entry found yet. You can add it from Manage tab.'}
           </p>
         )}
       </section>
