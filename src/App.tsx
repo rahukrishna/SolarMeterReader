@@ -65,6 +65,19 @@ type BillingCycleSummary = {
   closingBank: number
 }
 
+type BillingSnapshotSummary = {
+  periodLabel: string
+  importConsumed: number
+  exportConsumed: number
+  netConsumed: number
+  solarAdded: number
+  openingBank: number
+  bankUsed: number
+  bankAdded: number
+  payableUnits: number
+  closingBank: number
+}
+
 type DerivedReading = Reading & {
   importTotal: number
   exportTotal: number
@@ -1839,6 +1852,37 @@ const findLatestKsebBillReading = (items: Reading[]) =>
     .filter((reading) => (reading.note ?? '').toLowerCase().includes('kseb bill'))
     .sort((a, b) => getReadingTimestamp(b) - getReadingTimestamp(a))[0] ?? null
 
+const buildBillingSnapshotSummary = (
+  referenceReading: Reading,
+  closingReading: Reading,
+  openingBank: number,
+): BillingSnapshotSummary => {
+  const importConsumed =
+    calculateImportTotal(closingReading) - calculateImportTotal(referenceReading)
+  const exportConsumed =
+    calculateExportTotal(closingReading) - calculateExportTotal(referenceReading)
+  const netConsumed = importConsumed - exportConsumed
+  const solarAdded = closingReading.solarGenerated - referenceReading.solarGenerated
+
+  const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
+  const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
+  const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
+  const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
+
+  return {
+    periodLabel: `${dayjs(referenceReading.date).format('DD MMM YYYY')} - ${dayjs(closingReading.date).format('DD MMM YYYY')}`,
+    importConsumed,
+    exportConsumed,
+    netConsumed,
+    solarAdded,
+    openingBank,
+    bankUsed,
+    bankAdded,
+    payableUnits,
+    closingBank,
+  }
+}
+
 
 const toPercent = (value: number) => `${value.toFixed(1)}%`
 
@@ -2713,10 +2757,6 @@ function App() {
     }
   }, [sortedReadings, billingDay, billingCycles, selectedBillingCycleKey, ksebBillSnapshot])
 
-  const currentBank = billingCycles.length
-    ? billingCycles[billingCycles.length - 1].closingBank
-    : 0
-
   const latestKsebBillReading = useMemo(() => {
     if (ksebBillSnapshot) {
       return {
@@ -2792,6 +2832,56 @@ function App() {
     return combined
   }, [sortedReadings, ksebBillSnapshot])
 
+  const billCycleViewOptions = useMemo(() => {
+    if (!ksebBillReadings.length) {
+      return []
+    }
+
+    const options: Array<{
+      id: string
+      billReading: Reading
+      label: string
+      summary: BillingSnapshotSummary
+    }> = []
+
+    let runningBank = 0
+
+    for (let index = 0; index < ksebBillReadings.length; index += 1) {
+      const endBill = ksebBillReadings[index]
+      const endBillTs = getReadingTimestamp(endBill)
+
+      const prevBill = index > 0 ? ksebBillReadings[index - 1] : null
+      const referenceReading =
+        prevBill ??
+        [...sortedReadings]
+          .filter((reading) => getReadingTimestamp(reading) < endBillTs)
+          .at(0)
+
+      if (!referenceReading) {
+        continue
+      }
+
+      const summary = buildBillingSnapshotSummary(referenceReading, endBill, runningBank)
+      runningBank = summary.closingBank
+
+      const id = `bill-cycle-${endBill.date}T${endBill.time}`
+      const label = `${dayjs(endBill.date).format('MMM YYYY')} (${dayjs(referenceReading.date).format('DD MMM')} → ${dayjs(endBill.date).format('DD MMM')})`
+
+      options.push({
+        id,
+        billReading: endBill,
+        label,
+        summary,
+      })
+    }
+
+    return options
+  }, [ksebBillReadings, sortedReadings])
+
+  const currentBank = billCycleViewOptions.length
+    ? billCycleViewOptions[billCycleViewOptions.length - 1].summary.closingBank
+    : 0
+
   const liveBillingSummary = useMemo(() => {
     const latestReading = sortedReadings[sortedReadings.length - 1]
 
@@ -2806,110 +2896,8 @@ function App() {
       return null
     }
 
-    const importConsumed =
-      calculateImportTotal(latestReading) - calculateImportTotal(latestKsebBillReading)
-    const exportConsumed =
-      calculateExportTotal(latestReading) - calculateExportTotal(latestKsebBillReading)
-    const netConsumed = importConsumed - exportConsumed
-    const solarAdded = latestReading.solarGenerated - latestKsebBillReading.solarGenerated
-
-    // Use currentBank directly — it is the last completed cycle's closing bank,
-    // consistently derived from readings on all devices regardless of billingDay setting.
-    const openingBank = currentBank
-
-    const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
-    const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
-    const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
-    const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
-
-    return {
-      periodLabel: `${dayjs(latestKsebBillReading.date).format('DD MMM YYYY')} - ${dayjs(latestReading.date).format('DD MMM YYYY')}`,
-      importConsumed,
-      exportConsumed,
-      netConsumed,
-      solarAdded,
-      payableUnits,
-      closingBank,
-    }
+    return buildBillingSnapshotSummary(latestKsebBillReading, latestReading, currentBank)
   }, [sortedReadings, latestKsebBillReading, currentBank])
-
-  const billCycleViewOptions = useMemo(() => {
-    if (!ksebBillReadings.length) {
-      return []
-    }
-
-    // Build purely from consecutive bill readings — zero dependency on billingDay or billingCycles.
-    // Each bill reading closes a cycle whose start is the previous bill (or first reading before it).
-    const options: Array<{
-      id: string
-      billReading: Reading
-      label: string
-      summary: {
-        periodLabel: string
-        importConsumed: number
-        exportConsumed: number
-        netConsumed: number
-        solarAdded: number
-        payableUnits: number
-        closingBank: number
-      }
-    }> = []
-
-    let runningBank = 0
-
-    for (let index = 0; index < ksebBillReadings.length; index++) {
-      const endBill = ksebBillReadings[index]
-      const endBillTs = getReadingTimestamp(endBill)
-
-      // Reference: previous bill reading if exists, otherwise the FIRST (baseline/installation)
-      // reading before this bill — so the first bill cycle covers full consumption since day 1.
-      const prevBill = index > 0 ? ksebBillReadings[index - 1] : null
-      const referenceReading =
-        prevBill ??
-        [...sortedReadings]
-          .filter((reading) => getReadingTimestamp(reading) < endBillTs)
-          .at(0)
-
-      if (!referenceReading) {
-        continue
-      }
-
-      const importConsumed =
-        calculateImportTotal(endBill) - calculateImportTotal(referenceReading)
-      const exportConsumed =
-        calculateExportTotal(endBill) - calculateExportTotal(referenceReading)
-      const netConsumed = importConsumed - exportConsumed
-      const solarAdded = endBill.solarGenerated - referenceReading.solarGenerated
-
-      const openingBank = runningBank
-      const bankUsed = netConsumed > 0 ? Math.min(openingBank, netConsumed) : 0
-      const bankAdded = netConsumed < 0 ? Math.abs(netConsumed) : 0
-      const payableUnits = netConsumed > 0 ? netConsumed - bankUsed : 0
-      const closingBank = Math.max(0, openingBank - bankUsed) + bankAdded
-
-      runningBank = closingBank
-
-      const id = `bill-cycle-${endBill.date}T${endBill.time}`
-      const label = `${dayjs(endBill.date).format('MMM YYYY')} (${dayjs(referenceReading.date).format('DD MMM')} → ${dayjs(endBill.date).format('DD MMM')})`
-
-      options.push({
-        id,
-        billReading: endBill,
-        label,
-        summary: {
-          periodLabel: `${dayjs(referenceReading.date).format('DD MMM YYYY')} - ${dayjs(endBill.date).format('DD MMM YYYY')}`,
-          importConsumed,
-          exportConsumed,
-          netConsumed,
-          solarAdded,
-          payableUnits,
-          closingBank,
-        },
-      })
-    }
-
-    return options
-  }, [ksebBillReadings, sortedReadings])
 
   const pendingBillCycleLabel = useMemo(() => {
     const latestBill = ksebBillReadings[ksebBillReadings.length - 1]
