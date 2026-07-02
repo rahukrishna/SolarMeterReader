@@ -5587,8 +5587,12 @@ function App() {
           <p>{formatUnits(rangeSummary.solarTotal)}</p>
         </article>
         <article className="card kpi accent">
-          <h2>Current Bank</h2>
+          <h2>Opening Bank (Last Bill)</h2>
           <p>{formatUnits(currentBank)}</p>
+        </article>
+        <article className="card kpi accent">
+          <h2>Live Bank (Now)</h2>
+          <p>{formatUnits(liveBillingSummary?.closingBank ?? currentBank)}</p>
         </article>
         <article className="card kpi">
           <h2>Last KSEB Reading</h2>
